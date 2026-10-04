@@ -220,7 +220,11 @@ static void talk_button(unsigned ev)
         hold_started = false;
         consumed = false;
         menu_at_press = muse_menu_is_open();
-        if (muse_link_talk_press()) {
+        if (muse_state_asleep()) {
+            /* The first press of every physical button only wakes the screen. */
+            set_asleep(false, muse_board->talk_button);
+            consumed = true;
+        } else if (muse_link_talk_press()) {
             /* Confirmed a Muse app pairing (Link's setup button). */
             muse_state_poke();
             consumed = true;
@@ -229,8 +233,6 @@ static void talk_button(unsigned ev)
             muse_state_poke();
             post(MUSE_PTT_DOWN, false);
             consumed = true;
-        } else if (muse_state_asleep()) {
-            set_asleep(false, muse_board->talk_button);
         }
     }
 

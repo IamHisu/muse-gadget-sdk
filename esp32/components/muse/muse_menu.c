@@ -106,7 +106,7 @@ static const char *const ITEM_ACTIONS[ITEM_COUNT] = {
     [ITEM_MIC] = "Change",
     [ITEM_SLEEP] = "Change",
     [ITEM_PHONE] = "Open",
-    [ITEM_WIFI] = "Toggle",
+    [ITEM_WIFI] = "Open",
     [ITEM_INFO] = "Open",
     [ITEM_BATTERY] = "Open",
     [ITEM_RESET] = "Select",
@@ -127,11 +127,31 @@ typedef enum {
     VIEW_CLOSED,
     VIEW_LIST,
     VIEW_BLUETOOTH,
+    VIEW_WIFI,
+    VIEW_WIFI_PASSWORD,
     VIEW_STATUS,
     VIEW_BATTERY,
     VIEW_POWER,
     VIEW_RESET,
 } view_t;
+
+#define MENU_WIFI_MAX 12
+#define WIFI_VISIBLE_ROWS 6
+#define PASS_COLS 8
+#define PASS_ROWS 5
+#define PASS_CHAR_COUNT 36
+#define PASS_KEY_COUNT (PASS_COLS * PASS_ROWS)
+#define PASS_MODE_KEY 36
+#define PASS_DELETE_KEY 37
+#define PASS_CONNECT_KEY 38
+#define PASS_CANCEL_KEY 39
+
+static const char *const PASS_KEYSETS[] = {
+    "abcdefghijklmnopqrstuvwxyz0123456789",
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    "!@#$%^&*()-_=+[]{};:,.?/\\|0123456789",
+};
+static const char *const PASS_MODE_KEYS[] = { "Aa", "#+", "abc" };
 
 static QueueHandle_t s_keys;
 static volatile bool s_open;
@@ -144,18 +164,32 @@ static int s_row_h;
 static float s_last_key;
 static float s_next_refresh;
 static int64_t s_batt_shown_us;   /* the battery page reads the PM stats, so once a second */
+static muse_wifi_ap_t s_wifi_aps[MENU_WIFI_MAX];
+static int s_wifi_count;
+static int s_wifi_sel;
+static int s_wifi_first;
+static uint32_t s_wifi_gen;
+static char s_join_ssid[MUSE_SSID_MAX + 1];
+static char s_password[MUSE_PASS_MAX + 1];
+static int s_pass_len;
+static int s_pass_mode;
+static int s_pass_choice;
 
 static lv_obj_t *s_root;
 static lv_obj_t *s_title;
 static lv_obj_t *s_list;
 static lv_obj_t *s_rows[ITEM_COUNT];
 static lv_obj_t *s_values[ITEM_COUNT];
+static lv_obj_t *s_page_view;
 static lv_obj_t *s_page;        /* status and power-off confirmation text */
+static lv_obj_t *s_keyboard;
+static lv_obj_t *s_key_cells[PASS_KEY_COUNT];
+static lv_obj_t *s_key_labels[PASS_KEY_COUNT];
 static lv_obj_t *s_qr;
 static lv_obj_t *s_qr_caption;
 static lv_obj_t *s_hint_down;
 static lv_obj_t *s_hint_select;
-static const char *s_down_text;
+static lv_obj_t *s_hint_up;
 
 static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font, uint32_t color, const char *text)
 {
@@ -250,7 +284,8 @@ static void status_text(char *buf, size_t n)
         snprintf(batt, sizeof(batt), "%d%%%s", p.battery_pct, p.charging ? " +" : "");
     }
     const char *ble = b.state == MUSE_BLE_OFF ? "Off" : (b.state == MUSE_BLE_CONNECTED ? "Connected" : b.name);
-    snprintf(buf, n, "Wi-Fi %s\nIP    %s\nLink  %s\nMuse  %s\nBLE   %s\nPower %s\nVer   %s",
+    snprintf(buf, n, "#a77dff Wi-Fi# %s\n#a77dff IP#    %s\n#a77dff Link#  %s\n#a77dff Muse#  %s\n"
+             "#a77dff BLE#   %s\n#a77dff Power# %s\n#a77dff Ver#   %s",
              w.state == MUSE_WIFI_CONNECTED ? w.ssid : (w.state == MUSE_WIFI_OFF ? "off" : "offline"),
              w.state == MUSE_WIFI_CONNECTED ? w.ip : "-", muse_link_state_name(muse_link_state()),
              muse_hatch_state_name(h.state), ble, batt,
@@ -273,7 +308,7 @@ static void battery_text(char *buf, size_t n)
     muse_battery_t b;
     muse_battery_read(&b);
     if (!b.started) {
-        strlcpy(buf, "Unplug USB to start\nthe battery runtime test.", n);
+        strlcpy(buf, "#a77dff Battery test#\nUnplug USB to start\nthe battery runtime test.", n);
         return;
     }
     char t[24], rate[24] = "-", full[24] = "-", wakes[24] = "-", off[24], slept[24], busy[24];
@@ -294,14 +329,119 @@ static void battery_text(char *buf, size_t n)
     pm_text(off, b.screen_off_pm);
     pm_text(slept, b.slept_pm);
     pm_text(busy, b.busy_pm);
-    snprintf(buf, n, "%s  %s\nLevel  %d%% -> %d%%\nDrain  %s | %s\nScreen off  %s\nSleeping  %s\nWake %s | Busy %s",
+    snprintf(buf, n, "#a77dff State# %s  %s\n#a77dff Level# %d%% -> %d%%\n"
+             "#a77dff Drain# %s | %s\n#a77dff Screen off# %s\n#a77dff Sleeping# %s\n"
+             "#a77dff Wake# %s | #a77dff Busy# %s",
              b.running ? "On battery" : "Last run", t, b.pct_start, b.pct_now,
              rate, full, off, slept, wakes, busy);
 }
 
+static const char *wifi_state_text(muse_wifi_state_t state)
+{
+    switch (state) {
+    case MUSE_WIFI_CONNECTED: return "Connected";
+    case MUSE_WIFI_CONNECTING: return "Joining...";
+    case MUSE_WIFI_FAILED: return "Connection failed";
+    case MUSE_WIFI_NOT_NEARBY: return "Network not found";
+    case MUSE_WIFI_OFF: return "Wi-Fi off";
+    default: return muse_wifi_scanning() ? "Scanning..." : "Choose a network";
+    }
+}
+
+static void wifi_page_text(char *buf, size_t n)
+{
+    uint32_t gen = 0;
+    muse_wifi_ap_t aps[MENU_WIFI_MAX];
+    int count = muse_wifi_scan_results(aps, MENU_WIFI_MAX, &gen);
+    if (gen != s_wifi_gen) {
+        memcpy(s_wifi_aps, aps, count * sizeof(aps[0]));
+        s_wifi_count = count;
+        s_wifi_gen = gen;
+        int total = s_wifi_count + 2; /* Scan again, Back */
+        if (s_wifi_sel >= total) {
+            s_wifi_sel = total - 1;
+        }
+    }
+
+    int total = s_wifi_count + 2;
+    if (s_wifi_sel < s_wifi_first) {
+        s_wifi_first = s_wifi_sel;
+    } else if (s_wifi_sel >= s_wifi_first + WIFI_VISIBLE_ROWS) {
+        s_wifi_first = s_wifi_sel - WIFI_VISIBLE_ROWS + 1;
+    }
+
+    muse_wifi_status_t status;
+    muse_wifi_status(&status);
+    size_t used = (size_t)snprintf(buf, n, "%s\n", wifi_state_text(status.state));
+    for (int row = 0, i = s_wifi_first; row < WIFI_VISIBLE_ROWS && i < total; row++, i++) {
+        char line[64];
+        if (i < s_wifi_count) {
+            const muse_wifi_ap_t *ap = &s_wifi_aps[i];
+            snprintf(line, sizeof(line), "%c %-19.19s %4d %c", i == s_wifi_sel ? '>' : ' ',
+                     ap->ssid, ap->rssi, ap->secure ? '*' : ' ');
+        } else if (i == s_wifi_count) {
+            snprintf(line, sizeof(line), "%c Scan again", i == s_wifi_sel ? '>' : ' ');
+        } else {
+            snprintf(line, sizeof(line), "%c Back", i == s_wifi_sel ? '>' : ' ');
+        }
+        if (used < n) {
+            used += (size_t)snprintf(buf + used, n - used, "%s%s", row ? "\n" : "", line);
+        }
+    }
+    set_text(s_hint_select, s_wifi_sel < s_wifi_count ? "Select" :
+             (s_wifi_sel == s_wifi_count ? "Scan" : "Back"));
+}
+
+static const char *pass_action(void)
+{
+    if (s_pass_choice < PASS_CHAR_COUNT) {
+        return "Add";
+    }
+    switch (s_pass_choice) {
+    case PASS_MODE_KEY: return "Mode";
+    case PASS_DELETE_KEY: return "Delete";
+    case PASS_CONNECT_KEY: return "Connect";
+    default: return "Cancel";
+    }
+}
+
+static void password_page_text(char *buf, size_t n)
+{
+    char masked[29];
+    int shown = s_pass_len > 28 ? 28 : s_pass_len;
+    memset(masked, '*', shown);
+    masked[shown] = '\0';
+    if (s_pass_len > shown) {
+        strlcpy(masked, "...", sizeof(masked));
+        int tail = shown - 3;
+        memset(masked + 3, '*', tail);
+        masked[3 + tail] = '\0';
+    }
+    snprintf(buf, n, "%.25s\nPass: %s  %d/%d", s_join_ssid, masked, s_pass_len, MUSE_PASS_MAX);
+
+    char key[4];
+    for (int i = 0; i < PASS_KEY_COUNT; i++) {
+        if (i < PASS_CHAR_COUNT) {
+            key[0] = PASS_KEYSETS[s_pass_mode][i];
+            key[1] = '\0';
+            set_text(s_key_labels[i], key);
+        } else if (i == PASS_MODE_KEY) {
+            set_text(s_key_labels[i], PASS_MODE_KEYS[s_pass_mode]);
+        } else if (i == PASS_DELETE_KEY) {
+            set_text(s_key_labels[i], LV_SYMBOL_BACKSPACE);
+        } else if (i == PASS_CONNECT_KEY) {
+            set_text(s_key_labels[i], "OK");
+        } else {
+            set_text(s_key_labels[i], "X");
+        }
+        lv_obj_set_style_bg_opa(s_key_cells[i], i == s_pass_choice ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    }
+    set_text(s_hint_select, pass_action());
+}
+
 static void refresh(void)
 {
-    char buf[256];
+    char buf[512];
     if (s_view == VIEW_LIST) {
         for (int i = 0; i < ITEM_COUNT; i++) {
             value_text(i, buf, sizeof(buf));
@@ -321,6 +461,12 @@ static void refresh(void)
             set_text(s_hint_select, ITEM_ACTIONS[s_sel]);
             s_shown_sel = s_sel;
         }
+    } else if (s_view == VIEW_WIFI) {
+        wifi_page_text(buf, sizeof(buf));
+        set_text(s_page, buf);
+    } else if (s_view == VIEW_WIFI_PASSWORD) {
+        password_page_text(buf, sizeof(buf));
+        set_text(s_page, buf);
     } else if (s_view == VIEW_STATUS) {
         status_text(buf, sizeof(buf));
         set_text(s_page, buf);
@@ -340,25 +486,55 @@ static void show(view_t view)
     s_shown_sel = -1;
     s_batt_shown_us = 0;
     lv_obj_set_flag(s_list, LV_OBJ_FLAG_HIDDEN, view != VIEW_LIST);
-    lv_obj_set_flag(s_page, LV_OBJ_FLAG_HIDDEN, view == VIEW_LIST || view == VIEW_BLUETOOTH);
+    lv_obj_set_flag(s_page_view, LV_OBJ_FLAG_HIDDEN, view == VIEW_LIST || view == VIEW_BLUETOOTH);
+    lv_obj_set_flag(s_keyboard, LV_OBJ_FLAG_HIDDEN, view != VIEW_WIFI_PASSWORD);
     lv_obj_set_flag(s_qr, LV_OBJ_FLAG_HIDDEN, view != VIEW_BLUETOOTH);
     lv_obj_set_flag(s_qr_caption, LV_OBJ_FLAG_HIDDEN, view != VIEW_BLUETOOTH);
+    lv_obj_scroll_to_y(s_page_view, 0, LV_ANIM_OFF);
+    lv_label_set_recolor(s_page, false);
+    const char *left = LV_SYMBOL_DOWN, *right = LV_SYMBOL_UP;
+    if (view == VIEW_WIFI_PASSWORD) {
+        left = LV_SYMBOL_RIGHT;
+        right = LV_SYMBOL_DOWN;
+    } else if (view == VIEW_BLUETOOTH) {
+        left = "Off";
+        right = "";
+    } else if (view == VIEW_POWER) {
+        left = "Cancel";
+        right = "";
+    } else if (view == VIEW_RESET) {
+        left = "Back";
+        right = "";
+    }
+    set_text(s_hint_down, left);
+    set_text(s_hint_up, right);
     bool danger = view == VIEW_POWER || view == VIEW_RESET;
     lv_obj_set_style_text_color(s_hint_select, lv_color_hex(danger ? COLOR_DANGER : COLOR_TEXT), 0);
 
     switch (view) {
     case VIEW_BLUETOOTH:
         set_text(s_title, "BLUETOOTH SETUP");
-        set_text(s_hint_down, "Turn off");
         set_text(s_hint_select, "Back");
+        break;
+    case VIEW_WIFI:
+        lv_obj_set_style_text_font(s_page, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_line_space(s_page, 2, 0);
+        lv_label_set_long_mode(s_page, LV_LABEL_LONG_MODE_WRAP);
+        set_text(s_title, "WI-FI SETUP");
+        break;
+    case VIEW_WIFI_PASSWORD:
+        lv_obj_set_style_text_font(s_page, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_line_space(s_page, 0, 0);
+        lv_label_set_long_mode(s_page, LV_LABEL_LONG_MODE_WRAP);
+        set_text(s_title, "WI-FI PASSWORD");
         break;
     case VIEW_STATUS:
     case VIEW_BATTERY:
         lv_obj_set_style_text_font(s_page, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_line_space(s_page, 2, 0);
-        lv_label_set_long_mode(s_page, LV_LABEL_LONG_MODE_CLIP);
+        lv_label_set_long_mode(s_page, LV_LABEL_LONG_MODE_WRAP);
+        lv_label_set_recolor(s_page, true);
         set_text(s_title, view == VIEW_STATUS ? "STATUS" : "BATTERY");
-        set_text(s_hint_down, "Back");
         set_text(s_hint_select, "Back");
         break;
     case VIEW_POWER: {
@@ -370,7 +546,6 @@ static void show(view_t view)
                  muse_board->aux_button);
         set_text(s_title, "POWER OFF");
         set_text(s_page, text);
-        set_text(s_hint_down, "Cancel");
         set_text(s_hint_select, "Power off");
         break;
     }
@@ -380,12 +555,10 @@ static void show(view_t view)
         lv_label_set_long_mode(s_page, LV_LABEL_LONG_MODE_WRAP);
         set_text(s_title, "RESET PAIRING");
         set_text(s_page, "Forget Wi-Fi and the Muse app pairing, then restart?");
-        set_text(s_hint_down, "Cancel");
         set_text(s_hint_select, "Reset");
         break;
     default:
         set_text(s_title, "MENU");
-        set_text(s_hint_down, s_down_text);
         break;
     }
     refresh();
@@ -399,6 +572,87 @@ static void open_menu(void)
     lv_obj_remove_flag(s_root, LV_OBJ_FLAG_HIDDEN);
     show(VIEW_LIST);
     s_open = true;
+}
+
+static void open_wifi_setup(void)
+{
+    muse_settings_set_wifi_on(true);
+    s_wifi_count = 0;
+    s_wifi_sel = 0;
+    s_wifi_first = 0;
+    s_wifi_gen = UINT32_MAX;
+    esp_err_t err = muse_wifi_scan();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "Wi-Fi scan: %s", esp_err_to_name(err));
+    }
+    show(VIEW_WIFI);
+}
+
+static void open_wifi_password(const char *ssid)
+{
+    strlcpy(s_join_ssid, ssid, sizeof(s_join_ssid));
+    memset(s_password, 0, sizeof(s_password));
+    s_pass_len = 0;
+    s_pass_mode = 0;
+    s_pass_choice = 0;
+    show(VIEW_WIFI_PASSWORD);
+}
+
+static void wifi_select(void)
+{
+    if (s_wifi_sel < s_wifi_count) {
+        muse_wifi_ap_t ap = s_wifi_aps[s_wifi_sel];
+        strlcpy(s_join_ssid, ap.ssid, sizeof(s_join_ssid));
+        if (ap.secure) {
+            open_wifi_password(ap.ssid);
+        } else {
+            muse_settings_set_wifi(ap.ssid, "");
+            show(VIEW_WIFI);
+        }
+    } else if (s_wifi_sel == s_wifi_count) {
+        s_wifi_gen = UINT32_MAX;
+        esp_err_t err = muse_wifi_scan();
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "Wi-Fi rescan: %s", esp_err_to_name(err));
+        }
+        refresh();
+    } else {
+        show(VIEW_LIST);
+    }
+}
+
+static void password_select(void)
+{
+    if (s_pass_choice < PASS_CHAR_COUNT) {
+        if (s_pass_len < MUSE_PASS_MAX) {
+            s_password[s_pass_len++] = PASS_KEYSETS[s_pass_mode][s_pass_choice];
+            s_password[s_pass_len] = '\0';
+        }
+    } else {
+        switch (s_pass_choice) {
+        case PASS_MODE_KEY:
+            s_pass_mode = (s_pass_mode + 1) % COUNT(PASS_KEYSETS);
+            break;
+        case PASS_DELETE_KEY:
+            if (s_pass_len > 0) {
+                s_password[--s_pass_len] = '\0';
+            }
+            break;
+        case PASS_CONNECT_KEY:
+            muse_settings_set_wifi_on(true);
+            muse_settings_set_wifi(s_join_ssid, s_password);
+            memset(s_password, 0, sizeof(s_password));
+            s_pass_len = 0;
+            show(VIEW_WIFI);
+            return;
+        default:
+            memset(s_password, 0, sizeof(s_password));
+            s_pass_len = 0;
+            show(VIEW_WIFI);
+            return;
+        }
+    }
+    refresh();
 }
 
 static void activate(int item)
@@ -431,8 +685,8 @@ static void activate(int item)
         show(VIEW_BLUETOOTH);
         return;
     case ITEM_WIFI:
-        muse_settings_set_wifi_on(!muse_settings_wifi_on());
-        break;
+        open_wifi_setup();
+        return;
     case ITEM_INFO:
         show(VIEW_STATUS);
         return;
@@ -457,6 +711,12 @@ static void activate(int item)
     refresh();
 }
 
+static void scroll_page(int pixels)
+{
+    lv_obj_update_layout(s_page_view);
+    lv_obj_scroll_to_y(s_page_view, lv_obj_get_scroll_y(s_page_view) + pixels, LV_ANIM_ON);
+}
+
 static void handle(muse_menu_key_t key)
 {
     switch (s_view) {
@@ -478,26 +738,63 @@ static void handle(muse_menu_key_t key)
         break;
     case VIEW_STATUS:
     case VIEW_BATTERY:
-        show(VIEW_LIST);
+        if (key == MUSE_MENU_DOWN) {
+            scroll_page(32);
+        } else if (key == MUSE_MENU_UP) {
+            scroll_page(-32);
+        } else if (key == MUSE_MENU_SELECT) {
+            show(VIEW_LIST);
+        }
         break;
     case VIEW_BLUETOOTH:
-        if (key == MUSE_MENU_DOWN || key == MUSE_MENU_UP) {
+        if (key == MUSE_MENU_DOWN) {
             muse_settings_set_ble_on(false);
-        }
-        show(VIEW_LIST);
-        break;
-    case VIEW_POWER:
-        if (key == MUSE_MENU_DOWN || key == MUSE_MENU_UP) {
             show(VIEW_LIST);
-        } else {
+        } else if (key == MUSE_MENU_SELECT) {
+            show(VIEW_LIST);
+        }
+        break;
+    case VIEW_WIFI: {
+        int total = s_wifi_count + 2;
+        if (key == MUSE_MENU_DOWN) {
+            s_wifi_sel = (s_wifi_sel + 1) % total;
+            refresh();
+        } else if (key == MUSE_MENU_UP) {
+            s_wifi_sel = (s_wifi_sel + total - 1) % total;
+            refresh();
+        } else if (key == MUSE_MENU_SELECT) {
+            wifi_select();
+        }
+        break;
+    }
+    case VIEW_WIFI_PASSWORD: {
+        if (key == MUSE_MENU_DOWN) {
+            int row = s_pass_choice / PASS_COLS;
+            int col = (s_pass_choice % PASS_COLS + 1) % PASS_COLS;
+            s_pass_choice = row * PASS_COLS + col;
+            refresh();
+        } else if (key == MUSE_MENU_UP) {
+            int row = (s_pass_choice / PASS_COLS + 1) % PASS_ROWS;
+            int col = s_pass_choice % PASS_COLS;
+            s_pass_choice = row * PASS_COLS + col;
+            refresh();
+        } else if (key == MUSE_MENU_SELECT) {
+            password_select();
+        }
+        break;
+    }
+    case VIEW_POWER:
+        if (key == MUSE_MENU_DOWN) {
+            show(VIEW_LIST);
+        } else if (key == MUSE_MENU_SELECT) {
             muse_menu_close();
             muse_input_request_power_off();
         }
         break;
     case VIEW_RESET:
-        if (key == MUSE_MENU_DOWN || key == MUSE_MENU_UP) {
+        if (key == MUSE_MENU_DOWN) {
             show(VIEW_LIST);
-        } else {
+        } else if (key == MUSE_MENU_SELECT) {
             muse_menu_close();
             muse_state_set_caption("RESETTING...");
             muse_link_reset_setup();
@@ -519,23 +816,6 @@ bool muse_menu_is_open(void)
     return s_open;
 }
 
-/* On the bottom bar, on the side of the button's face icon. */
-static void align_on_bar(lv_obj_t *l, lv_align_t icon, int pad)
-{
-    switch (icon) {
-    case LV_ALIGN_BOTTOM_LEFT:
-    case LV_ALIGN_LEFT_MID:
-        lv_obj_align(l, LV_ALIGN_BOTTOM_LEFT, 2 * pad, -pad);
-        break;
-    case LV_ALIGN_BOTTOM_MID:
-        lv_obj_align(l, LV_ALIGN_BOTTOM_MID, 0, -pad);
-        break;
-    default:
-        lv_obj_align(l, LV_ALIGN_BOTTOM_RIGHT, -2 * pad, -pad);
-        break;
-    }
-}
-
 void muse_menu_build(lv_obj_t *parent, int w, int h)
 {
     bool small = h < 200 || w < 200;
@@ -547,11 +827,7 @@ void muse_menu_build(lv_obj_t *parent, int w, int h)
     int hint_h = small ? 17 : 44;
     s_row_h = small ? 16 : 36;
     s_visible_rows = (h - title_h - hint_h) / s_row_h;
-    /* A button on the right edge (StickS3) gets its hint turned on end in a
-     * strip beside it, clear of the list. */
-    const muse_button_hint_t *talk = &muse_board->talk_hint, *aux = &muse_board->aux_hint;
-    bool aux_side = aux->align == LV_ALIGN_RIGHT_MID;
-    int strip = aux_side ? lv_font_get_line_height(font) + 2 : 0;
+    int strip = 0;
 
     s_keys = xQueueCreate(8, sizeof(uint8_t));
 
@@ -590,13 +866,48 @@ void muse_menu_build(lv_obj_t *parent, int w, int h)
         s_rows[i] = r;
     }
 
-    s_page = label(s_root, fine, COLOR_TEXT, "");
-    lv_obj_set_width(s_page, w - 4 * pad - strip);
-    lv_obj_set_height(s_page, h - title_h - hint_h - 2 * pad);
+    s_page_view = lv_obj_create(s_root);
+    lv_obj_remove_style_all(s_page_view);
+    lv_obj_set_size(s_page_view, w - 4 * pad - strip, h - title_h - hint_h - 2 * pad);
+    lv_obj_set_pos(s_page_view, 2 * pad, title_h + pad);
+    lv_obj_set_scroll_dir(s_page_view, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_page_view, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_remove_flag(s_page_view, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_page_view, LV_OBJ_FLAG_HIDDEN);
+
+    s_page = label(s_page_view, fine, COLOR_TEXT, "");
+    lv_obj_set_width(s_page, lv_pct(100));
+    lv_obj_set_height(s_page, LV_SIZE_CONTENT);
     lv_obj_set_style_text_line_space(s_page, small ? 3 : 8, 0);
     lv_label_set_long_mode(s_page, LV_LABEL_LONG_MODE_WRAP);
-    lv_obj_set_pos(s_page, 2 * pad, title_h + pad);
-    lv_obj_add_flag(s_page, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_pos(s_page, 0, 0);
+
+    int key_gap = small ? 1 : 2;
+    int keyboard_x = small ? 2 : 4;
+    int keyboard_y = title_h + (small ? 22 : 39);
+    int keyboard_w = w - 2 * keyboard_x;
+    int keyboard_h = h - hint_h - keyboard_y - (small ? 1 : 3);
+    int key_w = (keyboard_w - (PASS_COLS - 1) * key_gap) / PASS_COLS;
+    int key_h = (keyboard_h - (PASS_ROWS - 1) * key_gap) / PASS_ROWS;
+    s_keyboard = lv_obj_create(s_root);
+    lv_obj_remove_style_all(s_keyboard);
+    lv_obj_set_size(s_keyboard, keyboard_w, keyboard_h);
+    lv_obj_set_pos(s_keyboard, keyboard_x, keyboard_y);
+    lv_obj_remove_flag(s_keyboard, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_keyboard, LV_OBJ_FLAG_HIDDEN);
+    for (int i = 0; i < PASS_KEY_COUNT; i++) {
+        lv_obj_t *key = lv_obj_create(s_keyboard);
+        lv_obj_remove_style_all(key);
+        lv_obj_set_size(key, key_w, key_h);
+        lv_obj_set_pos(key, (i % PASS_COLS) * (key_w + key_gap),
+                       (i / PASS_COLS) * (key_h + key_gap));
+        lv_obj_set_style_radius(key, small ? 2 : 4, 0);
+        lv_obj_set_style_bg_color(key, lv_color_hex(COLOR_SELECTED), 0);
+        lv_obj_remove_flag(key, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        s_key_cells[i] = key;
+        s_key_labels[i] = label(key, fine, COLOR_TEXT, "");
+        lv_obj_center(s_key_labels[i]);
+    }
 
     /* A phone scans this HTTPS page, then its browser opens the Web Bluetooth
      * device picker. The QR is deliberately large and high contrast for the
@@ -616,28 +927,19 @@ void muse_menu_build(lv_obj_t *parent, int w, int h)
     lv_obj_align(s_qr_caption, LV_ALIGN_TOP_MID, 0, title_h + (small ? 108 : 134));
     lv_obj_add_flag(s_qr_caption, LV_OBJ_FLAG_HIDDEN);
 
-    /* Hints sit next to their buttons, where the face shows their icons. */
+    /* Match the physical Zhengchen order: volume down, BOOT, volume up. */
     lv_obj_t *rule = lv_obj_create(s_root);
     lv_obj_remove_style_all(rule);
     lv_obj_set_size(rule, w, 1);
     lv_obj_set_style_bg_color(rule, lv_color_hex(COLOR_RULE), 0);
     lv_obj_set_style_bg_opa(rule, LV_OPA_COVER, 0);
     lv_obj_align(rule, LV_ALIGN_BOTTOM_MID, 0, -hint_h);
-    s_hint_down = label(s_root, font, COLOR_TEXT, "");
-    if (aux_side) {
-        /* Reads downwards, the arrow pointing down; centred on the icon's
-         * spot so it stays put as the text changes. */
-        s_down_text = "Down " LV_SYMBOL_RIGHT;
-        lv_obj_set_style_transform_rotation(s_hint_down, 900, 0);
-        lv_obj_set_style_transform_pivot_x(s_hint_down, lv_pct(50), 0);
-        lv_obj_set_style_transform_pivot_y(s_hint_down, lv_pct(50), 0);
-        lv_obj_align(s_hint_down, LV_ALIGN_CENTER, (w - strip) / 2, aux->y);
-    } else {
-        s_down_text = LV_SYMBOL_DOWN " Down";
-        align_on_bar(s_hint_down, aux->align, pad);
-    }
+    s_hint_down = label(s_root, font, COLOR_TEXT, LV_SYMBOL_DOWN);
+    lv_obj_align(s_hint_down, LV_ALIGN_BOTTOM_LEFT, pad, -pad);
     s_hint_select = label(s_root, font, COLOR_TEXT, "");
-    align_on_bar(s_hint_select, talk->align, pad);
+    lv_obj_align(s_hint_select, LV_ALIGN_BOTTOM_MID, 0, -pad);
+    s_hint_up = label(s_root, font, COLOR_TEXT, LV_SYMBOL_UP);
+    lv_obj_align(s_hint_up, LV_ALIGN_BOTTOM_RIGHT, -pad, -pad);
 }
 
 bool muse_menu_tick(float now)
