@@ -86,10 +86,8 @@ static int s_forget_armed = -1;
 static int64_t s_forget_armed_us;
 static char s_join_ssid[MUSE_SSID_MAX + 1];
 
-/* Hatch page. */
-static lv_obj_t *s_hatch_status, *s_hatch_host, *s_hatch_vm, *s_hatch_token;
-static lv_obj_t *s_link_status, *s_link_reset_lbl;
-static int64_t s_link_reset_armed_us;
+/* Gemini page. The API key is stored in the legacy Hatch NVS slot. */
+static lv_obj_t *s_hatch_status, *s_hatch_token;
 
 /* Bluetooth page. */
 static lv_obj_t *s_ble_sw, *s_ble_status;
@@ -818,10 +816,7 @@ static void tick_wifi(void)
     }
 }
 
-/* ---------- Hatch ---------- */
-
-static void on_hatch_host_done(const char *text) { muse_settings_set_hatch_host(text); }
-static void on_hatch_vm_done(const char *text) { muse_settings_set_hatch_vm(text); }
+/* ---------- Gemini ---------- */
 
 static void on_hatch_token_done(const char *text)
 {
@@ -830,26 +825,10 @@ static void on_hatch_token_done(const char *text)
     }
 }
 
-static void on_hatch_host(lv_event_t *e)
-{
-    (void)e;
-    char host[MUSE_HOST_MAX + 1];
-    muse_settings_hatch_host(host);
-    open_text("Muse server", host, false, MUSE_HOST_MAX, "Empty for the default", on_hatch_host_done, s_hatch);
-}
-
-static void on_hatch_vm(lv_event_t *e)
-{
-    (void)e;
-    char vm[MUSE_VM_MAX + 1];
-    muse_settings_hatch_vm(vm);
-    open_text("VM ID", vm, false, MUSE_VM_MAX, "Optional", on_hatch_vm_done, s_hatch);
-}
-
 static void on_hatch_token(lv_event_t *e)
 {
     (void)e;
-    open_text("Device token", "", true, MUSE_TOKEN_MAX, "Empty keeps the current one", on_hatch_token_done, s_hatch);
+    open_text("Gemini API key", "", true, MUSE_TOKEN_MAX, "Empty keeps the current one", on_hatch_token_done, s_hatch);
 }
 
 static void on_hatch_test(lv_event_t *e)
@@ -858,48 +837,18 @@ static void on_hatch_test(lv_event_t *e)
     muse_hatch_test();
 }
 
-/* Two taps within a few seconds: this wipes Wi-Fi and the Muse app pairing. */
-static void on_link_reset(lv_event_t *e)
-{
-    (void)e;
-    int64_t now = esp_timer_get_time();
-    if (s_link_reset_armed_us && now - s_link_reset_armed_us < 5000000) {
-        set_text(s_link_reset_lbl, "Resetting...");
-        muse_link_reset_setup();
-        return;
-    }
-    s_link_reset_armed_us = now;
-    set_text(s_link_reset_lbl, "Tap again to reset");
-}
-
 static void build_hatch_page(lv_obj_t *tile)
 {
     lv_obj_t *list;
-    s_hatch = page(tile, "MUSE", true, &list);
-    s_link_reset_armed_us = 0;
-    s_link_status = note(list, "");
-    button(list, "Reset pairing", COLOR_DANGER, on_link_reset, &s_link_reset_lbl);
+    s_hatch = page(tile, "GEMINI", true, &list);
     s_hatch_status = note(list, "");
-    row(list, NULL, "Server", &s_hatch_host, on_hatch_host, NULL);
-    row(list, NULL, "VM ID", &s_hatch_vm, on_hatch_vm, NULL);
-    row(list, NULL, "Device token", &s_hatch_token, on_hatch_token, NULL);
+    row(list, NULL, "API key", &s_hatch_token, on_hatch_token, NULL);
     button(list, "Test connection", COLOR_ACCENT, on_hatch_test, NULL);
-    note(list, "Pair with the Muse app to use your account; a device token here overrides it, and a long one is "
-               "easier to send over Bluetooth. The VM ID picks one of your VMs. "
-               "Reset pairing forgets Wi-Fi and the app pairing, then restarts.");
+    note(list, "The key is kept in this board's NVS. You can also set it from the Bluetooth setup page.");
 }
 
 static void tick_hatch(void)
 {
-    char link[64];
-    snprintf(link, sizeof(link), "Muse app: %s\n%s", muse_link_hatch_linked() ? "paired" : "not paired",
-             muse_link_state_name(muse_link_state()));
-    set_text(s_link_status, link);
-    if (s_link_reset_armed_us && esp_timer_get_time() - s_link_reset_armed_us >= 5000000) {
-        s_link_reset_armed_us = 0;
-        set_text(s_link_reset_lbl, "Reset pairing");
-    }
-
     muse_hatch_status_t h;
     muse_hatch_status(&h);
     char buf[96];
@@ -908,11 +857,6 @@ static void tick_hatch(void)
     lv_obj_set_style_text_color(s_hatch_status, lv_color_hex(h.state == MUSE_HATCH_REACHABLE ? COLOR_OK :
                                                              h.state == MUSE_HATCH_UNREACHABLE ? COLOR_WARN : COLOR_DIM), 0);
 
-    char host[MUSE_HOST_MAX + 1], vm[MUSE_VM_MAX + 1];
-    muse_settings_hatch_host(host);
-    muse_settings_hatch_vm(vm);
-    set_text(s_hatch_host, host);
-    set_text(s_hatch_vm, vm[0] ? vm : "Not set");
     size_t n = muse_settings_hatch_token_len();
     snprintf(buf, sizeof(buf), n ? "Set (%u chars)" : "Not set", (unsigned)n);
     set_text(s_hatch_token, buf);
@@ -1248,7 +1192,7 @@ static void build_home(lv_obj_t *tile)
     lv_obj_t *list;
     s_home = page(tile, "SETTINGS", false, &list);
     row(list, LV_SYMBOL_WIFI, "Wi-Fi", &s_home_wifi, on_nav, (void *)&WIFI);
-    row(list, LV_SYMBOL_HOME, "Muse", &s_home_hatch, on_nav, (void *)&HATCH);
+    row(list, LV_SYMBOL_HOME, "Gemini", &s_home_hatch, on_nav, (void *)&HATCH);
     row(list, LV_SYMBOL_BLUETOOTH, "Bluetooth", &s_home_ble, on_nav, (void *)&BLE);
     row(list, LV_SYMBOL_VOLUME_MAX, "Sound", &s_home_sound, on_nav, (void *)&SOUND);
     row(list, LV_SYMBOL_EYE_CLOSE, "Sleep", &s_home_sleep, on_nav, (void *)&SLEEP);

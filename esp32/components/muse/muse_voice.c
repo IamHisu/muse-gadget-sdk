@@ -469,9 +469,9 @@ static const char *not_ready_reason(void)
     muse_hatch_status_t st;
     muse_hatch_status(&st);
     switch (st.state) {
-    case MUSE_HATCH_NOT_SET: return "SET UP MUSE FIRST";
+    case MUSE_HATCH_NOT_SET: return "SET GEMINI API KEY";
     case MUSE_HATCH_OFFLINE: return "NO WI-FI";
-    default: return "CAN'T REACH MUSE";
+    default: return "CAN'T REACH GEMINI";
     }
 }
 
@@ -769,7 +769,7 @@ static bool can_record(void)
     muse_hatch_status_t st;
     muse_hatch_status(&st);
     if (st.state == MUSE_HATCH_NOT_SET) {
-        go_idle("SET UP MUSE FIRST");
+        go_idle("SET GEMINI API KEY");
         return false;
     }
     if ((!ready || s_held_count) && s_held_count >= HELD_MAX) {

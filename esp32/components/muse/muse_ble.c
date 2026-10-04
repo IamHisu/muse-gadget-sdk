@@ -94,11 +94,13 @@ static int build_status(char *out, size_t len)
     return snprintf(out, len,
                     "{\"name\":\"%s\",\"fw\":\"%s\",\"battery\":%d,"
                     "\"wifi\":{\"on\":%s,\"state\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\",\"rssi\":%d},"
+                    "\"gemini\":{\"key\":%s,\"state\":\"%s\"},"
                     "\"hatch\":{\"host\":\"%s\",\"vm\":\"%s\",\"token\":%s,\"state\":\"%s\"},"
                     "\"link\":{\"paired\":%s,\"state\":\"%s\"},"
                     "\"volume\":%d,\"speaker\":%s,\"mic_gain\":%d,\"brightness\":%d,\"sleep\":%d,\"last\":\"%s\"}",
                     s_name, esp_app_get_description()->version, p.battery_pct,
                     muse_settings_wifi_on() ? "true" : "false", wifi_state_name(w.state), ssid_e, w.ip, w.rssi,
+                    muse_settings_hatch_token_len() ? "true" : "false", muse_hatch_state_name(h.state),
                     host_e, vm_e, muse_settings_hatch_token_len() ? "true" : "false", muse_hatch_state_name(h.state),
                     muse_link_hatch_linked() ? "true" : "false", muse_link_state_name(muse_link_state()),
                     muse_settings_volume(), muse_settings_speaker_on() ? "true" : "false",
@@ -189,14 +191,16 @@ static void run_command(char *cmd)
             muse_settings_set_wifi("", "");   /* every saved network */
         }
     } else if (!strcmp(cmd, "hatch.host")) {
-        muse_settings_set_hatch_host(v);
+        muse_settings_set_hatch_host(v);   /* accepted for the already-published setup page */
     } else if (!strcmp(cmd, "hatch.vm")) {
-        muse_settings_set_hatch_vm(v);
-    } else if (!strcmp(cmd, "hatch.token") || !strcmp(cmd, "hatch.token+")) {
-        if (muse_settings_set_hatch_token(v, cmd[11] == '+') != ESP_OK) {
-            res = "error: token too long";
+        muse_settings_set_hatch_vm(v);     /* no longer used by the Gemini backend */
+    } else if (!strcmp(cmd, "gemini.key") || !strcmp(cmd, "gemini.key+") ||
+               !strcmp(cmd, "hatch.token") || !strcmp(cmd, "hatch.token+")) {
+        bool append = cmd[strlen(cmd) - 1] == '+';
+        if (muse_settings_set_hatch_token(v, append) != ESP_OK) {
+            res = "error: API key too long";
         }
-    } else if (!strcmp(cmd, "hatch.test")) {
+    } else if (!strcmp(cmd, "gemini.test") || !strcmp(cmd, "hatch.test")) {
         muse_hatch_test();
     } else if (!strcmp(cmd, "test.loopback")) {
         muse_voice_request_loopback();
@@ -215,7 +219,8 @@ static void run_command(char *cmd)
     }
 
     /* Never echo secrets back. */
-    bool secret = !strcmp(cmd, "wifi.pass") || !strncmp(cmd, "hatch.token", 11);
+    bool secret = !strcmp(cmd, "wifi.pass") || !strncmp(cmd, "hatch.token", 11) ||
+                  !strncmp(cmd, "gemini.key", 10);
     snprintf(s_last, sizeof(s_last), "%s: %s", cmd, res);
     ESP_LOGI(TAG, "cmd %s%s%s -> %s", cmd, secret ? "" : "=", secret ? "" : v, res);
     muse_state_poke();

@@ -1273,7 +1273,7 @@ static void update_chrome(float now)
             snprintf(code, sizeof(code), "%06lu", (unsigned long)b.passkey);
             strlcpy(hint, s_small ? "Enter on phone" : "Enter it on your phone", sizeof(hint));
         }
-        const char *title = confirm ? (s_small ? "Muse app" : "Pair with Muse app") : "Pairing code";
+        const char *title = confirm ? (s_small ? "Phone" : "Confirm phone") : "Pairing code";
         if (strcmp(code, lv_label_get_text(s_pair_code)) != 0) {
             lv_label_set_text(s_pair_code, code);
             lv_label_set_text(s_pair_title, title);

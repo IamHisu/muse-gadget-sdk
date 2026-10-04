@@ -26,6 +26,17 @@ Target và profile Zhengchen đã được đặt mặc định trong `CMakeList
 
 Lần build đầu sẽ tải lại managed components và có thể dùng khoảng 500 MB tạm thời. Sau khi xóa `build` và `managed_components`, lần build tiếp theo sẽ tải và biên dịch lại.
 
+## Gemini
+
+Trợ lý giọng nói dùng Gemini Live và trả lời bằng tiếng Việt. API key được lưu trong NVS của board, không đặt trong source code hoặc `sdkconfig`.
+
+1. Mở menu **Bluetooth setup** trên board và quét QR.
+2. Kết nối với board, nhập mã ghép đôi đang hiện trên TFT.
+3. Nhập **Gemini API key**, bấm **Save**, rồi **Test connection**.
+4. Ở màn hình chính, giữ BOOT 1,5 giây để nói và bấm BOOT để kết thúc.
+
+Trang setup cũ đã publish vẫn dùng được: nhập Gemini API key vào ô **Device token**. Firmware giữ lệnh cũ để tương thích trong lúc trang mới chưa được deploy.
+
 ## Flash và monitor
 
 Chỉ chạy sau khi build thành công và đã xác định đúng cổng COM:

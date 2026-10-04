@@ -29,7 +29,7 @@
 static const char *TAG = "muse_settings";
 
 #define NS "muse"
-#define DEFAULT_HOST "hatch.metaaivm.com"
+#define DEFAULT_HOST "generativelanguage.googleapis.com"
 
 static struct {
     uint8_t volume;
@@ -136,7 +136,7 @@ esp_err_t muse_settings_init(void)
     s.volume = clampi(s.volume, 0, 100);
     s.mic_gain = clampi(s.mic_gain, 0, MUSE_MIC_GAIN_MAX);
     s.brightness = clampi(s.brightness, 10, 100);
-    ESP_LOGI(TAG, "vol %d%s, mic %d dB, bright %d, sleep %ds, wifi %s (%s), ble %s, muse %s",
+    ESP_LOGI(TAG, "vol %d%s, mic %d dB, bright %d, sleep %ds, wifi %s (%s), ble %s, gemini %s",
              s.volume, s.speaker_on ? "" : " (speaker off)", s.mic_gain, s.brightness, s.sleep_s, s.wifi_on ? "on" : "off",
              "network saved by Link", s.ble_on ? "on" : "off", s.token[0] ? "token set" : "no token");
     return ESP_OK;

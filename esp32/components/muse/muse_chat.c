@@ -39,7 +39,7 @@ void muse_hatch_report(muse_hatch_state_t state, const char *detail)
 
 bool muse_hatch_configured(void)
 {
-    return muse_settings_hatch_token_len() > 0 || muse_link_hatch_linked();
+    return muse_settings_hatch_token_len() > 0;
 }
 
 void muse_hatch_test(void)
@@ -61,7 +61,7 @@ void muse_hatch_status(muse_hatch_status_t *out)
 {
     if (!muse_hatch_configured()) {
         out->state = MUSE_HATCH_NOT_SET;
-        strlcpy(out->detail, "Pair in the Muse app", sizeof(out->detail));
+        strlcpy(out->detail, "Set Gemini API key", sizeof(out->detail));
         return;
     }
     portENTER_CRITICAL(&s_lock);

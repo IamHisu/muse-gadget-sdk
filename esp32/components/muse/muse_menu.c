@@ -285,11 +285,10 @@ static void status_text(char *buf, size_t n)
         snprintf(batt, sizeof(batt), "%d%%%s", p.battery_pct, p.charging ? " +" : "");
     }
     const char *ble = b.state == MUSE_BLE_OFF ? "Off" : (b.state == MUSE_BLE_CONNECTED ? "Connected" : b.name);
-    snprintf(buf, n, "#a77dff Wi-Fi# %s\n#a77dff IP#    %s\n#a77dff Link#  %s\n#a77dff Muse#  %s\n"
+    snprintf(buf, n, "#a77dff Wi-Fi#  %s\n#a77dff IP#     %s\n#a77dff Gemini# %s\n"
              "#a77dff BLE#   %s\n#a77dff Power# %s\n#a77dff Ver#   %s",
              w.state == MUSE_WIFI_CONNECTED ? w.ssid : (w.state == MUSE_WIFI_OFF ? "off" : "offline"),
-             w.state == MUSE_WIFI_CONNECTED ? w.ip : "-", muse_link_state_name(muse_link_state()),
-             muse_hatch_state_name(h.state), ble, batt,
+             w.state == MUSE_WIFI_CONNECTED ? w.ip : "-", muse_hatch_state_name(h.state), ble, batt,
              esp_app_get_description()->version);
     muse_text_to_ascii(buf, n);   /* network and phone names can have curly quotes */
 }

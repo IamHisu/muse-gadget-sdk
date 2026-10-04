@@ -249,9 +249,9 @@ static void talk_button(unsigned ev)
             if (!muse_hatch_configured()) {
                 /* The SDK token identifies this gadget during pairing; it is
                  * not the account/device credential required for chat. */
-                ESP_LOGW(TAG, "talk unavailable: Muse account is not provisioned");
+                ESP_LOGW(TAG, "talk unavailable: Gemini API key is not set");
                 muse_state_set_mode(MUSE_MODE_IDLE);
-                muse_state_set_caption("PAIR MUSE ACCOUNT FIRST");
+                muse_state_set_caption("SET GEMINI API KEY");
             } else {
                 /* Give immediate visual feedback; the voice task will either
                  * keep listening or replace this with a network error. */

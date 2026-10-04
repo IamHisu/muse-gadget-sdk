@@ -91,12 +91,8 @@
     </section>
 
     <section>
-      <h2>Muse</h2>
-      <label for="host">Server</label>
-      <input id="host" type="text" autocomplete="off" maxlength="63" placeholder="Leave empty for the default">
-      <label for="vm">VM ID <span class="dim">(optional; defaults to your default VM)</span></label>
-      <input id="vm" type="text" autocomplete="off" maxlength="63">
-      <label for="token">Device token <span class="dim">(leave empty to keep the current one)</span></label>
+      <h2>Gemini</h2>
+      <label for="token">Gemini API key <span class="dim">(leave empty to keep the current one)</span></label>
       <input id="token" type="password" autocomplete="off" maxlength="1023">
       <button id="hatch-save">Save</button>
       <button id="hatch-test" class="secondary">Test connection</button>
@@ -133,8 +129,17 @@ const NETWORKS = '4d757365-0004-4000-8000-6a6f6c6c7900';
 const TOKEN_CHUNK = 180;   // stays well under the 512-byte attribute limit
 
 const $ = id => document.getElementById(id);
-let device, cmdChar, statusChar, networksChar, queue = Promise.resolve();
+let device, cmdChar, statusChar, networksChar;
 let scanRunning = false;
+
+// Web Bluetooth allows only one GATT operation at a time, so every read and
+// write goes through this single queue.
+let gattQueue = Promise.resolve();
+function gatt(fn) {
+  const run = gattQueue.then(fn);
+  gattQueue = run.catch(() => {});   // one failure must not block the queue
+  return run;
+}
 
 function log(msg, cls) {
   const line = document.createElement('div');
@@ -143,36 +148,33 @@ function log(msg, cls) {
   $('log').prepend(line);
 }
 
-// Commands are serialized: each write waits for the previous one's response.
 function send(cmd, value = '') {
-  queue = queue.then(async () => {
-    await cmdChar.writeValueWithResponse(new TextEncoder().encode(`${cmd}=${value}`));
-  }).catch(e => log(`${cmd} failed: ${e.message}`, 'bad'));
-  return queue;
+  return gatt(() => cmdChar.writeValueWithResponse(new TextEncoder().encode(`${cmd}=${value}`)))
+    .catch(e => log(`${cmd} failed: ${e.message}`, 'bad'));
 }
 
 async function refresh() {
-  const s = JSON.parse(new TextDecoder().decode(await statusChar.readValue()));
-  const w = s.wifi, h = s.hatch;
+  const v = await gatt(() => statusChar.readValue());
+  const s = JSON.parse(new TextDecoder().decode(v));
+  const w = s.wifi, h = s.gemini;
   $('conn').textContent = `${s.name} · fw ${s.fw}`;
   $('status').innerHTML =
-    `Wi-Fi: <b>${w.on ? w.state : 'off'}</b>${w.ssid ? ` (${esc(w.ssid)}${w.ip ? `, ${w.ip}` : ''})` : ''}<br>` +
-    `Muse: <b>${esc(h.state)}</b> · token ${h.token ? 'set' : 'not set'}<br>` +
+    `Wi-Fi: <b>${w.on ? esc(w.state) : 'off'}</b>${w.ssid ? ` (${esc(w.ssid)}${w.ip ? `, ${esc(w.ip)}` : ''})` : ''}<br>` +
+    `Gemini: <b>${esc(h.state)}</b> · API key ${h.key ? 'set' : 'not set'}<br>` +
     (s.battery >= 0 ? `Battery ${s.battery}%` : 'Battery: n/a');
-  if (document.activeElement !== $('ssid') && !$('ssid').value) $('ssid').value = w.ssid;
-  if (document.activeElement !== $('host')) $('host').value = h.host;
-  if (document.activeElement !== $('vm')) $('vm').value = h.vm;
+  if (document.activeElement !== $('ssid') && !$('ssid').value) $('ssid').value = w.ssid || '';
   setRange('volume', s.volume, v => `${v}%`);
-  $('speaker').checked = s.speaker;
+  if (document.activeElement !== $('speaker')) $('speaker').checked = s.speaker;
   setRange('mic', s.mic_gain, v => `${v} dB`);
   setRange('bright', s.brightness, v => `${v}%`);
-  $('sleep').value = String(s.sleep);
+  if (document.activeElement !== $('sleep')) $('sleep').value = String(s.sleep);
 }
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 async function readNetworks() {
-  return JSON.parse(new TextDecoder().decode(await networksChar.readValue()));
+  const v = await gatt(() => networksChar.readValue());
+  return JSON.parse(new TextDecoder().decode(v));
 }
 
 function signal(rssi) {
@@ -260,6 +262,8 @@ async function connect() {
     $('connect').disabled = false;
     $('disconnect').disabled = true;
     networksChar = undefined;
+    gattQueue = Promise.resolve();
+    scanRunning = false;
   });
   log(`Connecting to ${device.name}…`);
   const server = await device.gatt.connect();
@@ -283,7 +287,7 @@ async function connect() {
      but reject the CCCD write used for notifications. Polling already keeps
      the page current, so notifications are an optional improvement. */
   try {
-    await statusChar.startNotifications();
+    await gatt(() => statusChar.startNotifications());
     statusChar.addEventListener('characteristicvaluechanged', e => {
       const msg = new TextDecoder().decode(e.target.value);
       log(msg, msg.includes('error') ? 'bad' : 'ok');
@@ -312,7 +316,7 @@ $('wifi-join').onclick = async () => {
   const ssid = selected === '__manual__' ? $('ssid').value.trim() : selected;
   if (!ssid) { log('Choose a network', 'bad'); return; }
   send('wifi.ssid', ssid);
-  if ($('pass').value) send('wifi.pass', $('pass').value);
+  send('wifi.pass', $('pass').value);   // always sent, so an open network clears the old password
   await send('wifi.connect');
   $('pass').value = '';
 };
@@ -324,16 +328,15 @@ $('wifi-forget').onclick = () => {
 };
 
 $('hatch-save').onclick = async () => {
-  send('hatch.host', $('host').value.trim());
-  send('hatch.vm', $('vm').value.trim());
   const token = $('token').value.trim();
+  const jobs = [];
   for (let i = 0; i < token.length; i += TOKEN_CHUNK) {
-    send(i ? 'hatch.token+' : 'hatch.token', token.slice(i, i + TOKEN_CHUNK));
+    jobs.push(send(i ? 'gemini.key+' : 'gemini.key', token.slice(i, i + TOKEN_CHUNK)));
   }
-  await queue;
+  await Promise.all(jobs);
   $('token').value = '';
 };
-$('hatch-test').onclick = () => send('hatch.test');
+$('hatch-test').onclick = () => send('gemini.test');
 
 for (const [id, cmd, fmt] of [['volume', 'volume', v => `${v}%`], ['mic', 'mic_gain', v => `${v} dB`],
                               ['bright', 'brightness', v => `${v}%`]]) {
@@ -343,8 +346,10 @@ for (const [id, cmd, fmt] of [['volume', 'volume', v => `${v}%`], ['mic', 'mic_g
 $('speaker').onchange = () => send('speaker', $('speaker').checked ? 1 : 0);
 $('sleep').onchange = () => send('sleep', $('sleep').value);
 
-// Keep Wi-Fi/Muse state fresh while connected.
-setInterval(() => { if (device?.gatt.connected && !$('controls').disabled) refresh().catch(() => {}); }, 3000);
+// Keep Wi-Fi/Gemini state fresh while connected (skipped during a Wi-Fi scan).
+setInterval(() => {
+  if (device?.gatt.connected && !$('controls').disabled && !scanRunning) refresh().catch(() => {});
+}, 3000);
 </script>
 </body>
 </html>
