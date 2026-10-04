@@ -51,6 +51,10 @@
   button.secondary { background:#2e2552; color:var(--text); }
   button:disabled { opacity:.4; cursor:default; }
   .row { display:flex; justify-content:space-between; gap:12px; }
+  .wifi-row { display:flex; align-items:center; gap:8px; }
+  .wifi-row select { flex:1; min-width:0; }
+  .wifi-row button { flex:none; margin:0; padding:10px 12px; }
+  .hidden { display:none !important; }
   #log { font:13px/1.5 ui-monospace, monospace; white-space:pre-wrap; color:var(--dim); max-height:180px; overflow:auto; }
   .ok { color:var(--ok); } .bad { color:var(--bad); }
   fieldset { border:0; padding:0; margin:0; }
@@ -72,8 +76,14 @@
   <fieldset id="controls" disabled>
     <section>
       <h2>Wi-Fi</h2>
-      <label for="ssid">Network name</label>
-      <input id="ssid" type="text" autocomplete="off" maxlength="32">
+      <label for="ssid-list">Network</label>
+      <div class="wifi-row">
+        <select id="ssid-list"><option value="">Connect and scan for networks</option></select>
+        <button id="wifi-scan" class="secondary" type="button">Scan</button>
+      </div>
+      <div id="wifi-scan-state" class="dim" style="margin-top:6px"></div>
+      <input id="ssid" class="hidden" type="text" autocomplete="off" maxlength="32"
+             placeholder="Hidden network name" style="margin-top:8px">
       <label for="pass">Password</label>
       <input id="pass" type="password" autocomplete="off" maxlength="64">
       <button id="wifi-join">Join</button>
@@ -119,10 +129,12 @@
 const SVC    = '4d757365-0001-4000-8000-6a6f6c6c7900';
 const CMD    = '4d757365-0002-4000-8000-6a6f6c6c7900';
 const STATUS = '4d757365-0003-4000-8000-6a6f6c6c7900';
+const NETWORKS = '4d757365-0004-4000-8000-6a6f6c6c7900';
 const TOKEN_CHUNK = 180;   // stays well under the 512-byte attribute limit
 
 const $ = id => document.getElementById(id);
-let device, cmdChar, statusChar, queue = Promise.resolve();
+let device, cmdChar, statusChar, networksChar, queue = Promise.resolve();
+let scanRunning = false;
 
 function log(msg, cls) {
   const line = document.createElement('div');
@@ -157,6 +169,81 @@ async function refresh() {
   $('sleep').value = String(s.sleep);
 }
 
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+async function readNetworks() {
+  return JSON.parse(new TextDecoder().decode(await networksChar.readValue()));
+}
+
+function signal(rssi) {
+  if (rssi >= -55) return '▂▄▆█';
+  if (rssi >= -67) return '▂▄▆';
+  if (rssi >= -75) return '▂▄';
+  return '▂';
+}
+
+function showNetworks(data) {
+  const list = $('ssid-list');
+  const previous = list.value || $('ssid').value;
+  list.replaceChildren();
+  const prompt = document.createElement('option');
+  prompt.value = '';
+  prompt.textContent = data.aps.length ? 'Choose a Wi-Fi network' : 'No networks found';
+  list.append(prompt);
+  for (const [ssid, rssi, secure] of data.aps) {
+    const option = document.createElement('option');
+    option.value = ssid;
+    option.textContent = `${ssid}   ${signal(rssi)}${secure ? '  🔒' : '  Open'}`;
+    list.append(option);
+  }
+  const manual = document.createElement('option');
+  manual.value = '__manual__';
+  manual.textContent = 'Other / hidden network…';
+  list.append(manual);
+
+  const match = [...list.options].some(option => option.value === previous);
+  if (match && previous) {
+    list.value = previous;
+  } else if (previous) {
+    list.value = '__manual__';
+    $('ssid').value = previous;
+  }
+  const manualSelected = list.value === '__manual__';
+  $('ssid').classList.toggle('hidden', !manualSelected);
+  $('wifi-scan-state').textContent = `${data.aps.length} network${data.aps.length === 1 ? '' : 's'} found`;
+}
+
+async function scanWifi() {
+  if (scanRunning || !networksChar) return;
+  scanRunning = true;
+  $('wifi-scan').disabled = true;
+  $('wifi-scan').textContent = 'Scanning…';
+  $('wifi-scan-state').textContent = 'Looking for nearby Wi-Fi networks…';
+  try {
+    const before = await readNetworks();
+    await send('wifi.scan');
+    const deadline = Date.now() + 15000;
+    let data = before;
+    do {
+      await sleep(500);
+      data = await readNetworks();
+      if (!data.scanning && data.gen !== before.gen) {
+        showNetworks(data);
+        log(`Found ${data.aps.length} Wi-Fi networks`, 'ok');
+        return;
+      }
+    } while (Date.now() < deadline && device?.gatt.connected);
+    throw new Error('Wi-Fi scan timed out');
+  } catch (e) {
+    $('wifi-scan-state').textContent = e.message;
+    log(e.message, 'bad');
+  } finally {
+    scanRunning = false;
+    $('wifi-scan').disabled = false;
+    $('wifi-scan').textContent = 'Scan';
+  }
+}
+
 function setRange(id, v, fmt) {
   if (document.activeElement !== $(id)) $(id).value = v;
   $(`${id}-v`).textContent = fmt($(id).value);
@@ -172,12 +259,14 @@ async function connect() {
     $('controls').disabled = true;
     $('connect').disabled = false;
     $('disconnect').disabled = true;
+    networksChar = undefined;
   });
   log(`Connecting to ${device.name}…`);
   const server = await device.gatt.connect();
   const svc = await server.getPrimaryService(SVC);
   cmdChar = await svc.getCharacteristic(CMD);
   statusChar = await svc.getCharacteristic(STATUS);
+  networksChar = await svc.getCharacteristic(NETWORKS);
   // The first protected read triggers pairing: enter the code shown on Muse.
   log('Pairing: enter the code shown on Muse if asked');
   await refresh();
@@ -191,6 +280,7 @@ async function connect() {
   $('controls').disabled = false;
   $('connect').disabled = true;
   $('disconnect').disabled = false;
+  scanWifi();
 }
 
 $('connect').onclick = () => {
@@ -198,16 +288,28 @@ $('connect').onclick = () => {
   connect().catch(e => log(e.message, 'bad'));
 };
 $('disconnect').onclick = () => device?.gatt.disconnect();
+$('wifi-scan').onclick = () => scanWifi();
+$('ssid-list').onchange = () => {
+  const manual = $('ssid-list').value === '__manual__';
+  $('ssid').classList.toggle('hidden', !manual);
+  if (manual) $('ssid').focus();
+};
 
 $('wifi-join').onclick = async () => {
-  const ssid = $('ssid').value.trim();
-  if (!ssid) { log('Enter a network name', 'bad'); return; }
+  const selected = $('ssid-list').value;
+  const ssid = selected === '__manual__' ? $('ssid').value.trim() : selected;
+  if (!ssid) { log('Choose a network', 'bad'); return; }
   send('wifi.ssid', ssid);
   if ($('pass').value) send('wifi.pass', $('pass').value);
   await send('wifi.connect');
   $('pass').value = '';
 };
-$('wifi-forget').onclick = () => { $('ssid').value = ''; send('wifi.forget'); };
+$('wifi-forget').onclick = () => {
+  $('ssid').value = '';
+  $('ssid-list').value = '';
+  $('ssid').classList.add('hidden');
+  send('wifi.forget');
+};
 
 $('hatch-save').onclick = async () => {
   send('hatch.host', $('host').value.trim());

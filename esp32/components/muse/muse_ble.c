@@ -44,6 +44,7 @@ void ble_store_config_init(void);
 static const ble_uuid128_t SVC_UUID = MUSE_UUID(0x01);
 static const ble_uuid128_t CMD_UUID = MUSE_UUID(0x02);
 static const ble_uuid128_t STATUS_UUID = MUSE_UUID(0x03);
+static const ble_uuid128_t NETWORKS_UUID = MUSE_UUID(0x04);
 
 static uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_status_handle;
@@ -105,6 +106,37 @@ static int build_status(char *out, size_t len)
                     muse_settings_sleep_s(), last_e);
 }
 
+/* Kept separate from STATUS so its normal device snapshot remains comfortably
+ * below the 512-byte GATT attribute limit. Compact tuples leave room for up to
+ * ten full-length SSIDs: [name, RSSI, secured]. */
+static int build_networks(char *out, size_t len)
+{
+    muse_wifi_ap_t aps[10];
+    uint32_t gen;
+    int n = muse_wifi_scan_results(aps, sizeof(aps) / sizeof(aps[0]), &gen);
+    size_t used = snprintf(out, len, "{\"scanning\":%s,\"gen\":%lu,\"aps\":[",
+                           muse_wifi_scanning() ? "true" : "false", (unsigned long)gen);
+    if (used >= len) {
+        return len ? (int)len - 1 : 0;
+    }
+    for (int i = 0; i < n; i++) {
+        char ssid_e[2 * MUSE_SSID_MAX + 1];
+        char entry[2 * MUSE_SSID_MAX + 32];
+        json_str(ssid_e, sizeof(ssid_e), aps[i].ssid);
+        int entry_len = snprintf(entry, sizeof(entry), "%s[\"%s\",%d,%s]",
+                                 i ? "," : "", ssid_e, aps[i].rssi,
+                                 aps[i].secure ? "true" : "false");
+        if (entry_len < 0 || used + (size_t)entry_len + 3 >= len) {
+            break;
+        }
+        memcpy(out + used, entry, entry_len);
+        used += entry_len;
+        out[used] = '\0';
+    }
+    used += snprintf(out + used, len - used, "]}");
+    return used < len ? (int)used : (int)len - 1;
+}
+
 static bool parse_int(const char *v, int lo, int hi, int *out)
 {
     char *end;
@@ -142,6 +174,13 @@ static void run_command(char *cmd)
         } else {
             muse_settings_set_wifi_on(true);
             muse_settings_set_wifi(s_pending_ssid, s_pending_pass);
+        }
+    } else if (!strcmp(cmd, "wifi.scan")) {
+        esp_err_t err = muse_wifi_scan();
+        if (err != ESP_OK) {
+            res = "error: wifi scan unavailable";
+        } else {
+            res = "scanning";
         }
     } else if (!strcmp(cmd, "wifi.forget")) {
         if (v[0]) {
@@ -230,6 +269,19 @@ static int on_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *
     return BLE_ATT_ERR_UNLIKELY;
 }
 
+static int on_networks_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn;
+    (void)attr;
+    (void)arg;
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    char buf[512];
+    int n = build_networks(buf, sizeof(buf));
+    return os_mbuf_append(ctxt->om, buf, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
 static const struct ble_gatt_svc_def SERVICES[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -246,6 +298,11 @@ static const struct ble_gatt_svc_def SERVICES[] = {
                 .val_handle = &s_status_handle,
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_READ_AUTHEN |
                          BLE_GATT_CHR_F_NOTIFY,
+            },
+            {
+                .uuid = &NETWORKS_UUID.u,
+                .access_cb = on_networks_access,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_READ_AUTHEN,
             },
             { 0 },
         },

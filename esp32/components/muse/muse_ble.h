@@ -26,12 +26,13 @@
  * BLE setup service. Home Link owns the NimBLE stack and advertises as
  * "Muse-XXXXXX"; this adds one GATT service to Link's server:
  *
- *   CMD    (write)       "key=value" text: wifi.ssid, wifi.pass, wifi.connect,
+ *   CMD    (write)       "key=value" text: wifi.scan, wifi.ssid, wifi.pass, wifi.connect,
  *                        wifi.forget (=ssid forgets that one, bare forgets all
  *                        saved networks), hatch.host, hatch.vm, hatch.token,
  *                        hatch.token+ (append chunk), hatch.test, volume,
  *                        mic_gain, brightness, sleep
  *   STATUS (read/notify) JSON snapshot; notifies a short result after each CMD
+ *   NETWORKS (read)     latest Wi-Fi scan as compact JSON
  *
  * Both require an encrypted, MITM-protected link: the phone pairs with the
  * 6-digit passkey Muse shows on screen. See tools/ble_setup.html.
