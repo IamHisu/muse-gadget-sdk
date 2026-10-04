@@ -266,21 +266,33 @@ async function connect() {
   const svc = await server.getPrimaryService(SVC);
   cmdChar = await svc.getCharacteristic(CMD);
   statusChar = await svc.getCharacteristic(STATUS);
-  networksChar = await svc.getCharacteristic(NETWORKS);
+  try {
+    networksChar = await svc.getCharacteristic(NETWORKS);
+  } catch (e) {
+    networksChar = undefined;
+    log('Wi-Fi scan service is not visible. Remove this device from Bluetooth settings, then pair again.', 'bad');
+  }
   // The first protected read triggers pairing: enter the code shown on Muse.
   log('Pairing: enter the code shown on Muse if asked');
   await refresh();
-  await statusChar.startNotifications();
-  statusChar.addEventListener('characteristicvaluechanged', e => {
-    const msg = new TextDecoder().decode(e.target.value);
-    log(msg, msg.includes('error') ? 'bad' : 'ok');
-    refresh().catch(() => {});
-  });
   log('Connected', 'ok');
   $('controls').disabled = false;
   $('connect').disabled = true;
   $('disconnect').disabled = false;
-  scanWifi();
+  /* Some Android Web Bluetooth implementations complete authenticated reads
+     but reject the CCCD write used for notifications. Polling already keeps
+     the page current, so notifications are an optional improvement. */
+  try {
+    await statusChar.startNotifications();
+    statusChar.addEventListener('characteristicvaluechanged', e => {
+      const msg = new TextDecoder().decode(e.target.value);
+      log(msg, msg.includes('error') ? 'bad' : 'ok');
+      refresh().catch(() => {});
+    });
+  } catch (e) {
+    log('Live notifications unavailable; using polling instead');
+  }
+  if (networksChar) scanWifi();
 }
 
 $('connect').onclick = () => {
