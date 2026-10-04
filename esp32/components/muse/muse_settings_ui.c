@@ -202,7 +202,7 @@ static lv_obj_t *page(lv_obj_t *tile, const char *title, bool back, lv_obj_t **l
     lv_obj_add_flag(p, LV_OBJ_FLAG_HIDDEN);
     catch_swipes(p);
 
-    lv_obj_t *t = label(p, compact ? &lv_font_montserrat_16 : &lv_font_unscii_16, COLOR_ACCENT, title);
+    lv_obj_t *t = label(p, &lv_font_montserrat_16, COLOR_ACCENT, title);
     lv_obj_set_style_text_letter_space(t, compact ? 0 : 2, 0);
     lv_obj_align(t, LV_ALIGN_TOP_MID, 0, compact ? (back ? 12 : 8) : 44);
 
@@ -935,10 +935,10 @@ static void build_ble_page(lv_obj_t *tile)
 {
     lv_obj_t *list;
     s_ble = page(tile, "BLUETOOTH", true, &list);
-    s_ble_sw = switch_row(list, "Phone setup", muse_settings_ble_on(), on_ble_sw);
+    s_ble_sw = switch_row(list, "Bluetooth setup", muse_settings_ble_on(), on_ble_sw);
     s_ble_status = note(list, "");
     button(list, "Forget paired phones", COLOR_DANGER, on_ble_forget, NULL);
-    note(list, "When on, Muse is visible to phones nearby. Open tools/ble_setup.html in Chrome, "
+    note(list, "When on, Muse is visible to phones nearby. Scan the QR code from the button menu, "
                "connect, and enter the code Muse shows to pair.");
 }
 

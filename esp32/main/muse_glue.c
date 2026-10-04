@@ -50,7 +50,7 @@ static const char *TAG = "link.muse";
 #define BIT_MUSE        BIT2    // Muse settings loaded
 
 #define KEEP_WIFI       BIT0    // wifi on/off or network changed
-#define KEEP_BLE        BIT1    // phone setup setting changed
+#define KEEP_BLE        BIT1    // Bluetooth setup setting changed
 #define KEEP_SAVE       BIT2    // remember s_ssid/s_pass first
 #define KEEP_RELOAD     BIT3    // Link may have changed the saved networks
 #define KEEP_FORGET     BIT4    // forget the networks marked in s_saved
@@ -476,7 +476,7 @@ static void keeper_task(void *arg) {
     if (setup_done && muse_settings_ble_on()) {
         // Registered devices boot with the phone companion off; the settings
         // switch turns it on until the next restart.
-        ESP_LOGI(TAG, "registered; phone setup BLE off at boot");
+        ESP_LOGI(TAG, "registered; Bluetooth setup off at boot");
         muse_settings_set_ble_on(false);
     }
     stack_monitor_t stack = STACK_MONITOR_INIT;
@@ -498,7 +498,7 @@ static void keeper_task(void *arg) {
             // companion; the settings switch can turn it back on.
             bool done = config_setup_complete();
             if (done && !setup_done && muse_settings_ble_on()) {
-                ESP_LOGI(TAG, "setup complete; turning phone setup BLE off");
+                ESP_LOGI(TAG, "setup complete; turning Bluetooth setup off");
                 muse_settings_set_ble_on(false);
                 pending |= KEEP_BLE;
             }

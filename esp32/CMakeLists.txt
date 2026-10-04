@@ -13,6 +13,8 @@
 # limitations under the License.
 
 cmake_minimum_required(VERSION 3.16)
+set(IDF_TARGET "esp32s3" CACHE STRING "Zhengchen target" FORCE)
+set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;devices/sdkconfig.muse-zhengchen-154")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/project.cmake")
 project(muse-gadget)
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/validate_config.cmake")

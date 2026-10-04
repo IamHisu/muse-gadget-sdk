@@ -23,7 +23,7 @@
 #include "freertos/queue.h"
 
 /*
- * Push-to-talk turn loop: hold -> stream speech to Hatch, release -> think -> speak.
+ * Voice loop: start gesture -> stream speech to Hatch -> silence -> think -> speak.
  * Out of Hatch's reach (Wi-Fi down, say) a note is saved to PSRAM and goes once
  * it's back, on boards with PSRAM. Consumes muse_input_event_t from `queue` and
  * drives muse_state for the UI.

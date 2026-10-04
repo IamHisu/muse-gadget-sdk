@@ -94,7 +94,12 @@ static lv_obj_t *s_face;
 static lv_obj_t *s_settings;
 static lv_obj_t *s_dots[2];
 static lv_obj_t *s_wifi_icon;
-static lv_obj_t *s_ble_icon;
+static lv_obj_t *s_wifi_slash;
+static lv_obj_t *s_status_mic;
+static lv_obj_t *s_battery_body;
+static lv_obj_t *s_battery_tip;
+static lv_obj_t *s_battery_segments[4];
+static lv_obj_t *s_battery_charge;
 static lv_obj_t *s_cover;
 static lv_obj_t *s_pair;
 static lv_obj_t *s_pair_code;
@@ -106,13 +111,14 @@ static lv_obj_t *s_ring;
 static lv_obj_t *s_bar;     /* compact layout's stand-in for the ring */
 static lv_obj_t *s_state_lbl;
 static lv_obj_t *s_name_lbl;    /* this gadget's own name, to tell it from the next one */
-static lv_obj_t *s_power_lbl;
 static lv_obj_t *s_caption_lbl;
 static lv_obj_t *s_reply_lbl;   /* full layout: the reply's page while answering */
 static lv_obj_t *s_meter[METER_SEGS];
 static lv_obj_t *s_speaker;
 static lv_obj_t *s_speaker_icon;
 static lv_obj_t *s_aux_icon;
+static lv_obj_t *s_boot_splash;
+static lv_image_dsc_t s_boot_gif_dsc;
 static lv_obj_t *s_image;   /* display.draw_url, over the face */
 #if CONFIG_MUSE_WATCHER_CAMERA
 static lv_obj_t *s_camera_hint;
@@ -125,6 +131,11 @@ static uint16_t *s_image_buf;
 static lv_area_t s_image_area;
 static bool s_image_dirty;
 static bool s_ready;
+
+#if LV_USE_GIF
+extern const uint8_t boot_gif_start[] asm("_binary_windows_xp_boot_gif_start");
+extern const uint8_t boot_gif_end[] asm("_binary_windows_xp_boot_gif_end");
+#endif
 
 static float s_level;
 static int s_shown_state = -1;
@@ -409,13 +420,18 @@ static lv_obj_t *make_mic(lv_obj_t *parent, int size)
     return box;
 }
 
-static void set_mic_color(uint32_t color)
+static void set_mic_object_color(lv_obj_t *mic, uint32_t color)
 {
-    for (uint32_t i = 0; i < lv_obj_get_child_count(s_mic_icon); i++) {
-        lv_obj_t *part = lv_obj_get_child(s_mic_icon, i);
+    for (uint32_t i = 0; i < lv_obj_get_child_count(mic); i++) {
+        lv_obj_t *part = lv_obj_get_child(mic, i);
         lv_obj_set_style_bg_color(part, lv_color_hex(color), 0);
         lv_obj_set_style_arc_color(part, lv_color_hex(color), LV_PART_MAIN);
     }
+}
+
+static void set_mic_color(uint32_t color)
+{
+    set_mic_object_color(s_mic_icon, color);
 }
 
 /* Icons beside the physical buttons, in place of an instruction caption. */
@@ -426,13 +442,13 @@ static void build_button_icons(lv_obj_t *face)
     lv_obj_align(s_mic_icon, t->align, t->x, t->y);
     set_mic_color(COLOR_DIM);
 
-    /* Without touch the aux button opens the menu rather than sleeping. A board
-     * that leaves aux_hint out has no button to put an icon beside. */
-    if (a->align == LV_ALIGN_DEFAULT) {
+    /* Button-only boards open the menu with BOOT, so the idle face needs no
+     * menu glyph. Touch boards may still show their physical power button. */
+    if (!muse_board->touch || a->align == LV_ALIGN_DEFAULT) {
         return;
     }
     s_aux_icon = make_label(face, s_small ? &lv_font_montserrat_14 : &lv_font_montserrat_28, COLOR_DIM);
-    lv_label_set_text(s_aux_icon, muse_board->touch ? LV_SYMBOL_POWER : LV_SYMBOL_LIST);
+    lv_label_set_text(s_aux_icon, LV_SYMBOL_POWER);
     lv_obj_align(s_aux_icon, a->align, a->x, a->y);
 }
 
@@ -588,7 +604,7 @@ static void set_answer(int which)
             lv_obj_add_flag(l->hides[i], LV_OBJ_FLAG_HIDDEN);
         }
     }
-    if (!muse_board->round) {
+    if (!muse_board->round && s_ring) {
         lv_obj_set_flag(s_ring, LV_OBJ_FLAG_HIDDEN, l != NULL);   /* the reply runs past a rectangle's ring */
     }
     if (l) {
@@ -790,8 +806,8 @@ static void build_screen(void)
         face = s_face;
     }
 
-    if (!s_small) {
-        /* Progress ring around the bezel. */
+    if (!s_small && muse_board->round) {
+        /* Round panels use the bezel as a progress ring. */
         int d = (s_w < s_h ? s_w : s_h) - 8;
         s_ring = lv_arc_create(face);
         lv_obj_set_size(s_ring, d, d);
@@ -839,18 +855,64 @@ static void build_screen(void)
     }
     build_button_icons(face);
 
-    /* Status line: connectivity icons + power. */
+    /* Top-right status, from left to right: active microphone, Wi-Fi and
+     * battery. Battery stays at the outer edge as on the Zhengchen UI. */
     lv_obj_t *status = lv_obj_create(face);
     lv_obj_remove_style_all(status);
     lv_obj_remove_flag(status, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(status, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(status, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(status, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(status, s_small ? 4 : 8, 0);
-    lv_obj_align(status, LV_ALIGN_TOP_MID, 0, s_small ? 1 : 20 + s_dy);
-    s_wifi_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
-    s_ble_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
-    s_power_lbl = make_label(status, &lv_font_unscii_8, COLOR_DIM);
+    lv_obj_set_style_pad_column(status, 5, 0);
+    lv_obj_align(status, LV_ALIGN_TOP_RIGHT, -7, 5);
+
+    s_status_mic = make_mic(status, 14);
+    set_mic_object_color(s_status_mic, COLOR_ACCENT);
+    lv_obj_add_flag(s_status_mic, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *wifi_box = lv_obj_create(status);
+    lv_obj_remove_style_all(wifi_box);
+    lv_obj_set_size(wifi_box, 18, 16);
+    lv_obj_remove_flag(wifi_box, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    s_wifi_icon = make_label(wifi_box, &lv_font_montserrat_14, COLOR_DIM);
+    lv_obj_center(s_wifi_icon);
+    lv_label_set_text(s_wifi_icon, LV_SYMBOL_WIFI);
+    static lv_point_precise_t wifi_slash_points[] = { { 1, 15 }, { 17, 1 } };
+    s_wifi_slash = lv_line_create(wifi_box);
+    lv_line_set_points(s_wifi_slash, wifi_slash_points, 2);
+    lv_obj_set_style_line_width(s_wifi_slash, 3, 0);
+    lv_obj_set_style_line_rounded(s_wifi_slash, true, 0);
+    lv_obj_set_style_line_color(s_wifi_slash, lv_color_hex(0xff554d), 0);
+
+    lv_obj_t *battery = lv_obj_create(status);
+    lv_obj_remove_style_all(battery);
+    lv_obj_set_size(battery, 25, 16);
+    lv_obj_remove_flag(battery, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    s_battery_body = lv_obj_create(battery);
+    lv_obj_remove_style_all(s_battery_body);
+    lv_obj_set_size(s_battery_body, 20, 12);
+    lv_obj_align(s_battery_body, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_border_width(s_battery_body, 2, 0);
+    lv_obj_set_style_border_color(s_battery_body, lv_color_hex(COLOR_LIT), 0);
+    lv_obj_set_style_radius(s_battery_body, 2, 0);
+    for (int i = 0; i < 4; i++) {
+        s_battery_segments[i] = lv_obj_create(s_battery_body);
+        lv_obj_remove_style_all(s_battery_segments[i]);
+        lv_obj_set_size(s_battery_segments[i], 3, 8);
+        lv_obj_set_pos(s_battery_segments[i], 2 + i * 4, 2);
+        lv_obj_set_style_bg_opa(s_battery_segments[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(s_battery_segments[i], 1, 0);
+    }
+    s_battery_tip = lv_obj_create(battery);
+    lv_obj_remove_style_all(s_battery_tip);
+    lv_obj_set_size(s_battery_tip, 3, 6);
+    lv_obj_align(s_battery_tip, LV_ALIGN_LEFT_MID, 20, 0);
+    lv_obj_set_style_bg_opa(s_battery_tip, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_battery_tip, 1, 0);
+    s_battery_charge = make_label(s_battery_body, &lv_font_montserrat_14, 0xffd54f);
+    lv_label_set_text(s_battery_charge, LV_SYMBOL_CHARGE);
+    lv_obj_center(s_battery_charge);
+    lv_obj_add_flag(s_battery_charge, LV_OBJ_FLAG_HIDDEN);
 
     /* The compact layout leaves the state to the avatar and the caption,
      * unless the screen is tall enough to fit it in small type above Muse. */
@@ -1166,22 +1228,15 @@ static void update_chrome(float now)
         muse_settings_ui_tick(lv_obj_get_scroll_x(s_tv) > 0);
     }
 
-    /* Joining, the icon blinks: the compact layout has no state label. */
+    /* Wi-Fi is always visible. Disconnected/connecting gets a slash over it. */
     muse_wifi_status_t w;
     muse_wifi_status(&w);
-    bool joining = w.state == MUSE_WIFI_CONNECTING || w.state == MUSE_WIFI_FAILED;
-    const char *wifi = w.state == MUSE_WIFI_CONNECTED || (joining && (int)(now * 2) % 2 == 0) ? LV_SYMBOL_WIFI : "";
-    if (strcmp(wifi, lv_label_get_text(s_wifi_icon)) != 0) {
-        lv_label_set_text(s_wifi_icon, wifi);
-    }
+    bool wifi_connected = w.state == MUSE_WIFI_CONNECTED;
+    lv_obj_set_style_text_color(s_wifi_icon, lv_color_hex(wifi_connected ? COLOR_ACCENT : COLOR_DIM), 0);
+    lv_obj_set_flag(s_wifi_slash, LV_OBJ_FLAG_HIDDEN, wifi_connected);
     s_idle_name = idle_name(w.state);
     muse_ble_status_t b;
     muse_ble_status(&b);
-    const char *ble = b.state != MUSE_BLE_OFF ? LV_SYMBOL_BLUETOOTH : "";
-    if (strcmp(ble, lv_label_get_text(s_ble_icon)) != 0) {
-        lv_label_set_text(s_ble_icon, ble);
-        lv_obj_set_style_text_color(s_ble_icon, lv_color_hex(b.state == MUSE_BLE_CONNECTED ? COLOR_ACCENT : COLOR_DIM), 0);
-    }
 
     /* Paired, the name has done its job (picking this one out in the Muse
      * app) and the speaker button has replies to mute. */
@@ -1277,19 +1332,16 @@ static void update_power(float now)
     s_next_power_update = now + 1.0f;
 
     muse_power_t p = muse_state_power();
-    char buf[32];
-    if (p.battery_pct < 0) {
-        strlcpy(buf, p.usb ? (s_small ? "USB" : "USB POWER") : "", sizeof(buf));
-    } else if (s_small) {
-        snprintf(buf, sizeof(buf), "%s%d%%", p.charging ? "+" : "", p.battery_pct);
-    } else if (p.charging) {
-        snprintf(buf, sizeof(buf), "CHARGING %d%%", p.battery_pct);
-    } else {
-        snprintf(buf, sizeof(buf), "BATTERY %d%%", p.battery_pct);
+    uint32_t color = p.charging ? COLOR_ACCENT : p.battery_pct >= 0 && p.battery_pct <= 20 ? 0xff554d : COLOR_LIT;
+    int pct = p.battery_pct < 0 ? 0 : p.battery_pct > 100 ? 100 : p.battery_pct;
+    int filled = pct == 0 ? 0 : (pct + 24) / 25;
+    lv_obj_set_style_border_color(s_battery_body, lv_color_hex(color), 0);
+    lv_obj_set_style_bg_color(s_battery_tip, lv_color_hex(color), 0);
+    for (int i = 0; i < 4; i++) {
+        lv_obj_set_style_bg_color(s_battery_segments[i], lv_color_hex(i < filled ? color : 0x302e3a), 0);
+        lv_obj_set_flag(s_battery_segments[i], LV_OBJ_FLAG_HIDDEN, p.charging);
     }
-    if (strcmp(buf, lv_label_get_text(s_power_lbl)) != 0) {
-        lv_label_set_text(s_power_lbl, buf);
-    }
+    lv_obj_set_flag(s_battery_charge, LV_OBJ_FLAG_HIDDEN, !p.charging);
 }
 
 static void update_status(muse_mode_t mode, float now)
@@ -1305,10 +1357,14 @@ static void update_status(muse_mode_t mode, float now)
         lv_obj_set_style_text_color(s_state_lbl, lv_color_hex(accent), 0);
         if (s_ring) {
             lv_obj_set_style_arc_color(s_ring, lv_color_hex(accent), LV_PART_INDICATOR);
-        } else {
+        } else if (s_bar) {
             lv_obj_set_style_bg_color(s_bar, lv_color_hex(accent), 0);
         }
         set_mic_color(mode == MUSE_MODE_LISTENING ? accent : COLOR_DIM);   /* lights up while recording */
+        lv_obj_set_flag(s_status_mic, LV_OBJ_FLAG_HIDDEN, mode != MUSE_MODE_LISTENING);
+        if (mode == MUSE_MODE_LISTENING) {
+            set_mic_object_color(s_status_mic, accent);
+        }
         s_shown_state = (int)mode;
         s_shown_lit = -1;
     }
@@ -1334,7 +1390,7 @@ static void update_status(muse_mode_t mode, float now)
             lv_arc_set_value(s_ring, ring);
             s_ring_value = ring;
         }
-    } else {
+    } else if (s_bar) {
         /* Bar along the bottom edge; a sliding segment while thinking. */
         int x = mode == MUSE_MODE_THINKING ? (int)(now * s_w) % s_w : 0;
         int w = ring * s_w / RING_RANGE;
@@ -1528,12 +1584,41 @@ esp_err_t muse_ui_start(void)
         muse_menu_build(lv_screen_active(), s_w, s_h);
     }
     build_overlays();
+#if LV_USE_GIF
+    s_boot_splash = lv_obj_create(lv_screen_active());
+    lv_obj_remove_style_all(s_boot_splash);
+    lv_obj_set_size(s_boot_splash, lv_pct(100), lv_pct(100));
+    lv_obj_set_style_bg_color(s_boot_splash, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_boot_splash, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(s_boot_splash, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_boot_gif_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    s_boot_gif_dsc.header.cf = LV_COLOR_FORMAT_RAW;
+    s_boot_gif_dsc.data_size = (uint32_t)(boot_gif_end - boot_gif_start);
+    s_boot_gif_dsc.data = boot_gif_start;
+    lv_obj_t *gif = lv_gif_create(s_boot_splash);
+    lv_gif_set_color_format(gif, LV_COLOR_FORMAT_RGB565);
+    lv_gif_set_src(gif, &s_boot_gif_dsc);
+    /* The embedded source is pre-sized to 240x180 for this panel. */
+    lv_obj_center(gif);
+    lv_obj_move_foreground(s_boot_splash);
+#endif
     lv_timer_create(frame_tick, muse_board->frame_ms, NULL);
     s_ready = true;
     muse_board->display_unlock();
 
     ESP_LOGI(TAG, "UI up: %dx%d, %d px Muse, %d ms frames", s_w, s_h, s_canvas_px, muse_board->frame_ms);
     return ESP_OK;
+}
+
+void muse_ui_boot_splash_hide(void)
+{
+    if (!s_boot_splash || !muse_board->display_lock(-1)) {
+        return;
+    }
+    lv_obj_delete(s_boot_splash);
+    s_boot_splash = NULL;
+    muse_board->display_unlock();
 }
 
 void muse_ui_show_face(void)

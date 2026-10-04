@@ -76,8 +76,9 @@ void muse_app_run(const muse_board_t *board)
     QueueHandle_t q = xQueueCreate(16, sizeof(muse_input_event_t));
     ESP_ERROR_CHECK(muse_input_start(q));
 
-    /* Let the boot animation (flame ignites, eyes open) play out. */
-    vTaskDelay(pdMS_TO_TICKS(1400));
+    /* About two loops of the 1.44 s startup GIF, then reveal Muse. */
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    muse_ui_boot_splash_hide();
     if (muse_voice_start(q) != ESP_OK) {
         ESP_LOGE(TAG, "voice pipeline unavailable");
     } else {

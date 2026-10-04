@@ -41,9 +41,13 @@
 static const char *TAG = "muse_voice";
 
 #define MAX_SECS 15
-#define TAIL_FRAMES (MUSE_AUDIO_RATE * 12 / 100)   /* capture lag + poll interval, stops before the release click */
+#define MANUAL_TAIL_FRAMES (MUSE_AUDIO_RATE * 12 / 100) /* keep the last syllable after a stop tap */
 #define MAX_FRAMES (MUSE_AUDIO_RATE * MAX_SECS)
-#define MIN_HELD_FRAMES (MUSE_AUDIO_RATE * 3 / 10)   /* shorter presses are taps, not speech */
+#define NO_SPEECH_FRAMES (MUSE_AUDIO_RATE * 5)       /* stop if nobody starts speaking */
+#define SPEECH_START_DBFS (-45.0f)                   /* three loud chunks start a phrase */
+#define SPEECH_CONTINUE_DBFS (-48.0f)                /* hysteresis while the phrase is active */
+#define SPEECH_START_CHUNKS 3                        /* 60 ms rejects the button click */
+#define SILENCE_CHUNKS 60                            /* 1.2 s of silence ends the phrase */
 #define PRE_CHUNKS 16                                  /* 320 ms of audio kept from before the press */
 #define SETTLE_CHUNKS 10   /* after Muse makes a sound, 200 ms of capture is its own tail */
 #define REST_BACKSTOP_MS 60000
@@ -235,14 +239,16 @@ static void take(rec_stats_t *st, const int16_t *pcm)
 }
 
 /*
- * Records speech until release or MAX_SECS, starting with the pre-roll; *held
- * gets the part after the press. It streams to Hatch as it goes if it can.
+ * An input DOWN starts recording after the board-specific gesture (a 1.5 s
+ * BOOT hold on Zhengchen). Recording stops after 1.2 seconds of silence, a
+ * second BOOT press, five seconds without speech, or MAX_SECS. It starts with the
+ * pre-roll and streams to Hatch as it goes if it can.
  * If not, the note is kept in s_rec to send later, and streams from partway
  * if Hatch comes within reach. Returns false if Hatch failed the turn with no
  * kept note to fall back on (why says what failed). There is no start chirp:
  * anything played now would land on top of the first words.
  */
-static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+static bool record(bool barge_in, bool *spoke, char *why, size_t cap)
 {
     muse_state_set_mode(MUSE_MODE_LISTENING);
     muse_state_set_progress(0);
@@ -270,13 +276,18 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
             n += MUSE_AUDIO_CHUNK;
         }
     }
-    size_t pre = n;
-    bool released = false;
+    bool speech_started = false;
+    int speech_chunks = 0;
+    int quiet_chunks = 0;
+    bool manual_stop = false;
+    bool silence_stop = false;
+    bool no_speech_stop = false;
     size_t stop_at = MAX_FRAMES;
     while (n + MUSE_AUDIO_CHUNK <= stop_at) {
         if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) {
             break;
         }
+        float chunk_db = muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK);
         muse_state_set_level(muse_audio_level(s_chunk, MUSE_AUDIO_CHUNK));
         take(&st, s_chunk);
         /* Live transcript as the caption. A failure stops the streaming; the
@@ -299,6 +310,27 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
             }
         }
         n += MUSE_AUDIO_CHUNK;
+        if (!speech_started) {
+            speech_chunks = chunk_db >= SPEECH_START_DBFS ? speech_chunks + 1 : 0;
+            if (speech_chunks >= SPEECH_START_CHUNKS) {
+                speech_started = true;
+                quiet_chunks = 0;
+                ESP_LOGI(TAG, "speech started");
+            } else if (n >= NO_SPEECH_FRAMES) {
+                no_speech_stop = true;
+                stop_at = n;
+            }
+        } else {
+            if (chunk_db < SPEECH_CONTINUE_DBFS) {
+                quiet_chunks++;
+            } else {
+                quiet_chunks = 0;
+            }
+            if (quiet_chunks >= SILENCE_CHUNKS) {
+                silence_stop = true;
+                stop_at = n;
+            }
+        }
         bool tick = n % (MUSE_AUDIO_CHUNK * 5) == 0;
         if (tick && s_rec && !s_live && !gave_up && !s_held_count && muse_hatch_ready()) {
             ESP_LOGI(TAG, "Muse in reach: streaming the note so far");
@@ -308,17 +340,16 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
         if (!heard && ok && tick) {
             muse_state_set_caption("%s %.1fs", s_live ? "LISTENING" : "RECORDING", (double)n / MUSE_AUDIO_RATE);
         }
-        /*
-         * Capture runs 60-80 ms behind real time and people let go on their
-         * last syllable, so keep going briefly after release.
-         */
-        if (!released && got_event(MUSE_PTT_UP)) {
-            released = true;
-            stop_at = n + TAIL_FRAMES < MAX_FRAMES ? n + TAIL_FRAMES : MAX_FRAMES;
+        /* Releases from the starting tap are ignored. A second press stops
+         * early and keeps a short tail so the last syllable is not clipped. */
+        if (!manual_stop && got_event(MUSE_PTT_DOWN)) {
+            manual_stop = true;
+            stop_at = n + MANUAL_TAIL_FRAMES < MAX_FRAMES
+                          ? n + MANUAL_TAIL_FRAMES : MAX_FRAMES;
         }
     }
     muse_state_set_level(0);
-    *held = n - pre;
+    *spoke = speech_started;
 
     char tail[160];
     int tl = 0;
@@ -329,7 +360,10 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
     ESP_LOGI(TAG, "end levels:%s", tail);
     float rms_db = st.frames ? 10.0f * log10f((float)(st.acc / st.frames / (32768.0 * 32768.0)) + 1e-10f) : -100.0f;
     ESP_LOGI(TAG, "recorded %.2fs%s: rms %.1f dBFS, peak %.1f dBFS, floor %.1f dBFS, %d clipped, gain %d dB",
-             (double)n / MUSE_AUDIO_RATE, released ? "" : " (max)", rms_db < -100.0f ? -100.0f : rms_db,
+             (double)n / MUSE_AUDIO_RATE,
+             manual_stop ? " (button)" : silence_stop ? " (silence)"
+             : no_speech_stop ? " (no speech)" : " (max)",
+             rms_db < -100.0f ? -100.0f : rms_db,
              20.0 * log10((st.peak + 1) / 32768.0), st.floor_db, st.clipped, muse_settings_mic_gain());
     return ok;
 }
@@ -470,23 +504,6 @@ static void set_resting(bool rest)
         pre_reset();
     }
     ESP_LOGI(TAG, "%s", rest ? "resting: codecs off, Wi-Fi modem sleep" : "awake: codecs on");
-}
-
-/*
- * A press that woke the screen: listen from now, into the pre-roll, and
- * record only if it's still held after a tap's length. False if it was let
- * go sooner: it only woke Muse.
- */
-static bool held_on_waking(void)
-{
-    s_settle = 0;   /* nothing played: no tail of Muse's own to skip */
-    for (size_t n = 0; n < MIN_HELD_FRAMES; n += MUSE_AUDIO_CHUNK) {
-        if (got_event(MUSE_PTT_UP)) {
-            return false;
-        }
-        idle_capture();
-    }
-    return !got_event(MUSE_PTT_UP);
 }
 
 static void drop_rec(void)
@@ -779,7 +796,6 @@ static void voice_task(void *arg)
     bool pending_down = false;
     muse_audio_selftest();
     for (;;) {
-        bool wake = false;
         if (!pending_down) {
             muse_input_event_t ev;
             bool asleep = muse_state_asleep();
@@ -840,25 +856,21 @@ static void voice_task(void *arg)
             if (ev.type != MUSE_PTT_DOWN) {
                 continue;
             }
-            wake = ev.wake;
-        }
-        if (wake && !held_on_waking()) {
-            continue;   /* a tap: it only woke Muse */
         }
         muse_wifi_power(MUSE_WIFI_FULL);
         if (!can_record()) {
             pending_down = false;
             continue;
         }
-        size_t held;
+        bool spoke = false;
         char why[96];
-        bool ok = record(pending_down, &held, why, sizeof(why));
+        bool ok = record(pending_down, &spoke, why, sizeof(why));
         pending_down = false;
-        if (held < MIN_HELD_FRAMES && !wake) {
+        if (!spoke) {
             muse_hatch_turn_cancel();
             drop_rec();
             pre_reset();
-            go_idle("HOLD LONGER TO TALK");
+            go_idle("DIDN'T HEAR YOU");
             continue;
         }
         if (!ok) {

@@ -14,73 +14,20 @@
 
 menu "Muse"
 
-    choice MUSE_BOARD
-        prompt "Board with the full UI"
-        default MUSE_BOARD_NONE
-        help
-            The UI is the voice companion on boards with a screen: an
-            animated avatar, push-to-talk chat, settings, and battery
-            handling. It runs beside Home Link, which owns Wi-Fi, BLE
-            pairing, credentials and OTA. Pick the board it runs on, or none
-            for a Link without a display.
-
-        config MUSE_BOARD_NONE
-            bool "None (Home Link without a display)"
-
-        config MUSE_BOARD_WAVESHARE_S3_175C
-            bool "Waveshare ESP32-S3-Touch-AMOLED-1.75C"
-            depends on IDF_TARGET_ESP32S3
-
-        config MUSE_BOARD_WAVESHARE_S3_175
-            bool "Waveshare ESP32-S3-Touch-AMOLED-1.75 (not the 1.75C)"
-            depends on IDF_TARGET_ESP32S3
-
-        config MUSE_BOARD_AIPI
-            bool "AIPI Lite (ESP32-S3, two buttons, no touch)"
-            depends on IDF_TARGET_ESP32S3
-
-        config MUSE_BOARD_ESPRESSIF_BOX_3
-            bool "Espressif ESP32-S3-BOX-3 (320x240 touch LCD, speaker and microphones)"
-            depends on IDF_TARGET_ESP32S3
-
-        config MUSE_BOARD_WAVESHARE_C6_18
-            bool "Waveshare ESP32-C6-Touch-AMOLED-1.8"
-            depends on IDF_TARGET_ESP32C6
-
-        config MUSE_BOARD_SENSECAP_WATCHER
-            bool "Seeed SenseCAP Watcher (ESP32-S3, round touch LCD, wheel)"
-            depends on IDF_TARGET_ESP32S3
-
-        config MUSE_BOARD_M5STACK_STICKS3
-            bool "M5Stack StickS3 (ESP32-S3, two buttons, no touch)"
-            depends on IDF_TARGET_ESP32S3
-
-        config MUSE_BOARD_M5STACK_STICKC_PLUS2
-            bool "M5Stack StickC Plus2 (ESP32, two buttons, no touch)"
-            depends on IDF_TARGET_ESP32
-
-        config MUSE_BOARD_M5STACK_STOPWATCH
-            bool "M5Stack StopWatch (ESP32-S3, round touch AMOLED)"
-            depends on IDF_TARGET_ESP32S3
-    endchoice
+    config MUSE_BOARD_ZHENGCHEN_154
+        bool "Zhengchen 1.54 TFT Wi-Fi"
+        depends on IDF_TARGET_ESP32S3
+        default y
 
     config MUSE_ENABLED
         bool
-        default y if !MUSE_BOARD_NONE
+        default y if MUSE_BOARD_ZHENGCHEN_154
 
     # Always defined, unlike the target-dependent board options, so
     # idf_component.yml rules can select each board's managed components.
     config MUSE_BOARD_ID
         string
-        default "waveshare_s3_175c" if MUSE_BOARD_WAVESHARE_S3_175C
-        default "waveshare_s3_175" if MUSE_BOARD_WAVESHARE_S3_175
-        default "aipi" if MUSE_BOARD_AIPI
-        default "espressif_box_3" if MUSE_BOARD_ESPRESSIF_BOX_3
-        default "waveshare_c6_18" if MUSE_BOARD_WAVESHARE_C6_18
-        default "sensecap_watcher" if MUSE_BOARD_SENSECAP_WATCHER
-        default "m5stack_sticks3" if MUSE_BOARD_M5STACK_STICKS3
-        default "m5stack_stickc_plus2" if MUSE_BOARD_M5STACK_STICKC_PLUS2
-        default "m5stack_stopwatch" if MUSE_BOARD_M5STACK_STOPWATCH
+        default "zhengchen_154" if MUSE_BOARD_ZHENGCHEN_154
         default "none"
 
     # The Muse tools' serial port: the console UART behind the board's USB
@@ -88,17 +35,7 @@ menu "Muse"
     # (the Watcher's USB-C goes to a CH342) or the chip has none.
     config MUSE_CONSOLE_UART
         bool
-        default y if MUSE_BOARD_SENSECAP_WATCHER || !SOC_USB_SERIAL_JTAG_SUPPORTED
-
-    config MUSE_WATCHER_CAMERA
-        bool "SenseCAP Watcher camera capture and live preview"
-        depends on MUSE_BOARD_SENSECAP_WATCHER && SPIRAM
-        default n
-        help
-            Enable the camera.capture Home Link command and the wheel
-            double-click camera preview. Camera buffers and tasks consume
-            memory and preview decoding shares CPU time with voice and Link.
-            Leave disabled to build without camera support.
+        default y if !SOC_USB_SERIAL_JTAG_SUPPORTED
 
     config MUSE_HATCH
         bool "Muse's own voice session"

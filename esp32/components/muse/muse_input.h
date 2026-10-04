@@ -23,12 +23,14 @@
 #include "freertos/queue.h"
 
 /*
- * Buttons, as the board reports them. The talk button is push-to-talk. On touch
+ * Buttons, as the board reports them. On Zhengchen, a short BOOT press opens
+ * or selects the menu, holding BOOT for 1.5 seconds starts listening, and a
+ * BOOT press while listening stops early. On touch
  * boards the aux button puts the screen to sleep; holding it 1.5 s powers off,
- * and two quick presses toggle BLE phone setup. Without touch it opens the
- * two-button menu instead (muse_menu.h), where talk selects. Either button
- * wakes from sleep; the talk button's press is also posted, marked `wake`, so
- * holding it on through waking records a note. Waking also retries Wi-Fi at
+ * and two quick presses toggle Bluetooth setup. Without touch it opens the
+ * button menu instead (muse_menu.h), where BOOT selects. Any button
+ * wakes from sleep; the talk button's press also starts a note after waking.
+ * Waking retries Wi-Fi at
  * once if it's down. Also runs auto-sleep and refreshes battery status into
  * muse_state.
  */

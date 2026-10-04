@@ -53,7 +53,7 @@ typedef struct {
     esp_err_t (*wifi_scan)(void);
     bool (*wifi_scanning)(void);
     int (*wifi_scan_results)(muse_wifi_ap_t *out, int max, uint32_t *gen);
-    void (*ble_apply)(void);                      /* BLE phone setup setting changed */
+    void (*ble_apply)(void);                      /* Bluetooth setup setting changed */
     bool (*ble_started)(void);
     bool (*hatch_linked)(void);                   /* paired to a Hatch account */
     /* Fills the VM whose id is want_vm (empty: Link's preferred VM). *vm_token is heap. */

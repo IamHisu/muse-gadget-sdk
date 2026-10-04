@@ -56,11 +56,12 @@ static const char *TAG = "muse_input";
 #define POWER_MS 2000          /* refresh battery */
 #define REST_POWER_MS 10000    /* ... while paused */
 #define WIFI_NAP_MS (2 * 60 * 1000)   /* low power this long: Wi-Fi off until it ends */
-#define DOUBLE_TICKS 35        /* 350 ms: a second aux press within this toggles phone setup */
+#define DOUBLE_TICKS 35        /* 350 ms: a second aux press within this toggles Bluetooth setup */
 
 #define GOODBYE_MS 1500        /* let the goodbye animation play */
 #define HINT_TICKS 60          /* 0.6 s: warn that holding powers off */
 #define LONG_TICKS 150         /* 1.5 s: power off */
+#define TALK_HOLD_TICKS 150    /* 1.5 s: hold BOOT to start listening */
 #define SLEEP_CHECK_MS 100
 
 #define SERIAL_RX 1024         /* the driver drops what doesn't fit, so a console line must */
@@ -115,23 +116,23 @@ static void set_asleep(bool asleep, const char *why)
     }
 }
 
-static void toggle_phone_setup(void)
+static void toggle_bluetooth_setup(void)
 {
     bool on = !muse_settings_ble_on();
-    ESP_LOGI(TAG, "phone setup %s", on ? "on" : "off");
+    ESP_LOGI(TAG, "Bluetooth setup %s", on ? "on" : "off");
     muse_settings_set_ble_on(on);
     muse_ble_status_t b;
     muse_ble_status(&b);
     if (on && b.name[0]) {
-        muse_state_set_caption("PHONE SETUP: %s", b.name);
+        muse_state_set_caption("BLUETOOTH: %s", b.name);
     } else {
-        muse_state_set_caption("PHONE SETUP %s", on ? "ON" : "OFF");
+        muse_state_set_caption("BLUETOOTH %s", on ? "ON" : "OFF");
     }
 }
 
 /*
  * Aux button: short press sleeps, a 1.5 s hold powers off, any press wakes.
- * Two quick presses toggle BLE phone setup, so the sleep waits a moment to
+ * Two quick presses toggle Bluetooth setup, so the sleep waits a moment to
  * see whether a second press follows.
  */
 static void aux_button(bool pressed, bool edge)
@@ -154,7 +155,7 @@ static void aux_button(bool pressed, bool edge)
         } else if (sleep_in) {
             sleep_in = 0;
             swallow = true;
-            toggle_phone_setup();
+            toggle_bluetooth_setup();
         }
         return;
     }
@@ -180,92 +181,102 @@ static void aux_button(bool pressed, bool edge)
     }
 }
 
-/* No touch: the aux button opens the menu and steps down it; any press wakes. */
-static void menu_button(bool pressed, bool edge)
+/* No touch: the volume buttons move only while the BOOT-opened menu is visible. */
+static void menu_button(muse_menu_key_t key, bool pressed, bool edge)
 {
     if (!edge || !pressed) {
         return;
     }
     if (muse_state_asleep()) {
         set_asleep(false, muse_board->aux_button);
-    } else if (!s_talk_down) {
+    } else if (!s_talk_down && muse_menu_is_open()) {
         muse_state_poke();
-        muse_menu_key(MUSE_MENU_DOWN);
+        muse_menu_key(key);
     }
 }
 
-static void aux_key(bool pressed, bool edge)
+static void aux_key(muse_menu_key_t key, bool pressed, bool edge)
 {
     if (muse_board->touch) {
         aux_button(pressed, edge);
     } else {
-        menu_button(pressed, edge);
+        menu_button(key, pressed, edge);
     }
 }
 
-/* Talk button: push-to-talk, or Select while the menu is open. Asleep, the
- * press wakes and is posted as a waking one: muse_voice records only if it's
- * still held once awake. */
+/* BOOT is deliberately asymmetric: a short press opens/selects the menu, a
+ * 1.5 second hold starts listening, and a press while listening stops early. */
 static void talk_button(unsigned ev)
 {
-    bool talk_down = s_talk_down;
-    static bool swallow;
-#if CONFIG_MUSE_WATCHER_CAMERA
-    static TickType_t last_release;
-    if ((ev & MUSE_BTN_TALK_PRESS) && !muse_state_asleep()
-        && !muse_menu_is_open() && last_release
-        && xTaskGetTickCount() - last_release <= pdMS_TO_TICKS(350)) {
-        ESP_LOGI(TAG, "wheel double-click: camera preview/shutter");
-        last_release = 0;
-        watcher_camera_preview_toggle();
-        swallow = true;
-        return;
-    }
-#endif
-
-    /* A quick tap can latch press and release in the same poll, and a release
-     * can land just before the next press; keep them ordered. */
+    static int held;
+    static bool hold_started;
+    static bool consumed;
+    static bool menu_at_press;
     bool released = ev & MUSE_BTN_TALK_RELEASE;
-#if CONFIG_MUSE_WATCHER_CAMERA
-    bool saw_release = released;
-#endif
-    if ((talk_down || swallow) && released) {
-        if (talk_down) {
-            post(MUSE_PTT_UP, false);
-        }
-        talk_down = swallow = false;
-        released = false;
-    }
-    if (!talk_down && !swallow && (ev & MUSE_BTN_TALK_PRESS)) {
+
+    if (!s_talk_down && (ev & MUSE_BTN_TALK_PRESS)) {
+        s_talk_down = true;
+        held = 0;
+        hold_started = false;
+        consumed = false;
+        menu_at_press = muse_menu_is_open();
         if (muse_link_talk_press()) {
             /* Confirmed a Muse app pairing (Link's setup button). */
             muse_state_poke();
-            swallow = true;
+            consumed = true;
+        } else if (muse_state_mode(NULL) == MUSE_MODE_LISTENING) {
+            /* The recording loop treats another DOWN as a manual stop. */
+            muse_state_poke();
+            post(MUSE_PTT_DOWN, false);
+            consumed = true;
         } else if (muse_state_asleep()) {
             set_asleep(false, muse_board->talk_button);
-            post(MUSE_PTT_DOWN, true);
-            talk_down = true;
-        } else if (muse_menu_is_open()) {
+        }
+    }
+
+    if (s_talk_down && !released && !consumed && !menu_at_press && !hold_started) {
+        if (++held >= TALK_HOLD_TICKS) {
             muse_state_poke();
-            muse_menu_key(MUSE_MENU_SELECT);
-            swallow = true;
-        } else {
             post(MUSE_PTT_DOWN, false);
-            talk_down = true;
+            hold_started = true;
         }
     }
-    if ((talk_down || swallow) && released) {
-        if (talk_down) {
-            post(MUSE_PTT_UP, false);
+
+    if (s_talk_down && released) {
+        if (!consumed && !hold_started) {
+            muse_state_poke();
+            muse_menu_key(menu_at_press ? MUSE_MENU_SELECT : MUSE_MENU_OPEN);
         }
-        talk_down = swallow = false;
+        s_talk_down = false;
+        held = 0;
+        hold_started = false;
+        consumed = false;
     }
-#if CONFIG_MUSE_WATCHER_CAMERA
-    if (saw_release && !swallow) {
-        last_release = xTaskGetTickCount();
+}
+
+static void nav_edges(unsigned ev, unsigned press_mask, unsigned release_mask,
+                      bool *down, muse_menu_key_t key)
+{
+    bool press = ev & press_mask;
+    bool release = ev & release_mask;
+    bool edge = false;
+    if (*down && release) {
+        *down = false;
+        release = false;
+        edge = true;
+        aux_key(key, false, true);
     }
-#endif
-    s_talk_down = talk_down;
+    if (!*down && press) {
+        *down = edge = true;
+        aux_key(key, true, true);
+        if (release) {
+            *down = false;
+            aux_key(key, false, true);
+        }
+    }
+    if (!edge) {
+        aux_key(key, *down, false);
+    }
 }
 
 /* A pairing prompt wakes the screen and keeps it on; otherwise idle sleeps. */
@@ -369,6 +380,7 @@ static void input_task(void *arg)
 {
     (void)arg;
     bool aux_down = false;
+    bool up_down = false;
     bool paused = false;
     TickType_t checked = xTaskGetTickCount() - pdMS_TO_TICKS(SLEEP_CHECK_MS);
     TickType_t powered = xTaskGetTickCount() - pdMS_TO_TICKS(POWER_MS);
@@ -378,31 +390,12 @@ static void input_task(void *arg)
         if (ev & (MUSE_BTN_TALK_PRESS | MUSE_BTN_TALK_RELEASE)) {
             ESP_LOGI(TAG, "talk key:%s%s", ev & MUSE_BTN_TALK_PRESS ? " press" : "",
                      ev & MUSE_BTN_TALK_RELEASE ? " release" : "");
-            talk_button(ev);
         }
-        /* A latched key (the 1.75's PMU) can report press and release in the
-         * same poll, and a release can land just before the next press; keep
-         * them ordered, as talk_button does. */
-        bool aux_press = ev & MUSE_BTN_AUX_PRESS;
-        bool aux_release = ev & MUSE_BTN_AUX_RELEASE;
-        bool aux_edge = false;
-        if (aux_down && aux_release) {
-            aux_down = false;
-            aux_release = false;
-            aux_edge = true;
-            aux_key(false, true);
-        }
-        if (!aux_down && aux_press) {
-            aux_down = aux_edge = true;
-            aux_key(true, true);
-            if (aux_release) {
-                aux_down = false;
-                aux_key(false, true);
-            }
-        }
-        if (!aux_edge) {
-            aux_key(aux_down, false);
-        }
+        talk_button(ev);   /* also counts the 1.5 s hold between edges */
+        nav_edges(ev, MUSE_BTN_AUX_PRESS, MUSE_BTN_AUX_RELEASE,
+                  &aux_down, MUSE_MENU_DOWN);
+        nav_edges(ev, MUSE_BTN_UP_PRESS, MUSE_BTN_UP_RELEASE,
+                  &up_down, MUSE_MENU_UP);
 
         if (s_power_off_requested) {
             s_power_off_requested = false;

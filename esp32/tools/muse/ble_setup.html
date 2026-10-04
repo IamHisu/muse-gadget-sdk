@@ -15,10 +15,9 @@
   limitations under the License.
 -->
 <!--
-  Muse phone setup over Bluetooth LE (Web Bluetooth).
+  Muse setup over Bluetooth LE (Web Bluetooth).
 
-  1. On Muse: swipe left > Bluetooth > turn on "Phone setup" (no-touch boards:
-     menu button > Phone setup).
+  1. On Muse: open the button menu > Bluetooth setup and scan the QR code.
   2. Serve this folder and open it in Chrome (desktop or Android):
        cd tools && python3 -m http.server 8000   ->  http://localhost:8000/ble_setup.html
      Web Bluetooth needs https or localhost. iOS Safari lacks Web Bluetooth;
@@ -60,7 +59,7 @@
 <body>
 <main>
   <h1>Muse setup</h1>
-  <p class="dim">Turn on <b>Settings &rsaquo; Bluetooth &rsaquo; Phone setup</b> on Muse, then connect.
+  <p class="dim">Open <b>Bluetooth setup</b> on Muse, then connect.
      When asked to pair, type the code shown on Muse's screen.</p>
 
   <section>

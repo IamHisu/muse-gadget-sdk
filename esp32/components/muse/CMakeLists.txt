@@ -59,26 +59,9 @@ if(CONFIG_MUSE_ENABLED)
     else()
         list(APPEND srcs "../../avatar/muse_pixel.c")
     endif()
-    if(CONFIG_MUSE_BOARD_WAVESHARE_S3_175C OR CONFIG_MUSE_BOARD_WAVESHARE_S3_175)
-        # One driver: the 1.75 differs only in pins (its BSP's) and its PWR key.
-        list(APPEND srcs "boards/board_waveshare_s3_175c.c" "boards/muse_lcd_bands.c")
-    elseif(CONFIG_MUSE_BOARD_AIPI)
-        list(APPEND srcs "boards/board_aipi.c")
-    elseif(CONFIG_MUSE_BOARD_ESPRESSIF_BOX_3)
-        list(APPEND srcs "boards/board_espressif_box_3.c" "boards/box_3_microphone.c")
-    elseif(CONFIG_MUSE_BOARD_WAVESHARE_C6_18)
-        list(APPEND srcs "boards/board_waveshare_c6_18.c")
-    elseif(CONFIG_MUSE_BOARD_SENSECAP_WATCHER)
-        list(APPEND srcs "boards/board_sensecap_watcher.c" "boards/muse_lcd_bands.c")
-        if(CONFIG_MUSE_WATCHER_CAMERA)
-            list(APPEND srcs "boards/watcher_camera.c")
-        endif()
-    elseif(CONFIG_MUSE_BOARD_M5STACK_STICKS3)
-        list(APPEND srcs "boards/board_m5stack_sticks3.c")
-    elseif(CONFIG_MUSE_BOARD_M5STACK_STICKC_PLUS2)
-        list(APPEND srcs "boards/board_m5stack_stickc_plus2.c")
-    elseif(CONFIG_MUSE_BOARD_M5STACK_STOPWATCH)
-        list(APPEND srcs "boards/board_m5stack_stopwatch.c" "boards/muse_lcd_bands.c")
+    if(CONFIG_MUSE_BOARD_ZHENGCHEN_154)
+        list(APPEND srcs "boards/board_zhengchen_154.c")
+        list(APPEND embed "assets/windows_xp_boot.gif")
     endif()
 elseif(CONFIG_HOMEHUB_VOICE)
     # The Voice PE board uses just the Hatch voice session; the project's main/
@@ -93,8 +76,6 @@ set(muse_priv_requires
     noise_core minimp3
     esp_lcd esp_adc esp_driver_i2s esp_driver_ledc esp_driver_spi esp_driver_uart esp_wifi
     esp_driver_pcnt)
-list(APPEND muse_priv_requires camera)
-
 idf_component_register(
     SRCS ${srcs}
     INCLUDE_DIRS "."

@@ -27,6 +27,9 @@
  */
 esp_err_t muse_ui_start(void);
 
+/* Removes the short startup GIF and reveals the normal Muse face. */
+void muse_ui_boot_splash_hide(void);
+
 /* From any task: the screen has gone dark for sleep (and not yet woken). */
 bool muse_ui_dark(void);
 

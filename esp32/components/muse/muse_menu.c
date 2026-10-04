@@ -34,6 +34,7 @@
 #include "muse_settings.h"
 #include "muse_state.h"
 #include "muse_text.h"
+#include "muse_ui.h"
 #include "muse_voice.h"
 #include "muse_wifi.h"
 
@@ -46,6 +47,9 @@ static const char *TAG = "muse_menu";
 #define COLOR_RULE 0x2a2345
 #define COLOR_DANGER 0xff5c5c
 
+/* Hosted from this repository with GitHub Pages. Web Bluetooth requires HTTPS. */
+#define BLUETOOTH_SETUP_URL "https://iamhisu.github.io/muse-gadget-sdk/esp32/tools/muse/ble_setup.html"
+
 /* 128 px screens want a smaller face than the 14 px every board has. */
 #if LV_FONT_MONTSERRAT_12
 #define FONT_COMPACT (&lv_font_montserrat_12)
@@ -57,7 +61,7 @@ static const char *TAG = "muse_menu";
 #define REFRESH_S 0.25f
 
 /*
- * One list, stepped through with Down and acted on with Select. Settings
+ * One list, stepped through with Up/Down and acted on with Select. Settings
  * cycle through a few values on each Select (wrapping around), so nothing
  * needs a long press or a third button.
  */
@@ -84,7 +88,7 @@ static const char *const ITEM_NAMES[ITEM_COUNT] = {
     [ITEM_BRIGHTNESS] = "Brightness",
     [ITEM_MIC] = "Mic gain",
     [ITEM_SLEEP] = "Auto-sleep",
-    [ITEM_PHONE] = "Phone setup",
+    [ITEM_PHONE] = "Bluetooth setup",
     [ITEM_WIFI] = "Wi-Fi",
     [ITEM_INFO] = "Status",
     [ITEM_BATTERY] = "Battery",
@@ -101,7 +105,7 @@ static const char *const ITEM_ACTIONS[ITEM_COUNT] = {
     [ITEM_BRIGHTNESS] = "Change",
     [ITEM_MIC] = "Change",
     [ITEM_SLEEP] = "Change",
-    [ITEM_PHONE] = "Toggle",
+    [ITEM_PHONE] = "Open",
     [ITEM_WIFI] = "Toggle",
     [ITEM_INFO] = "Open",
     [ITEM_BATTERY] = "Open",
@@ -122,6 +126,7 @@ static const char *const SLEEP_NAMES[] = { "Never", "30 s", "1 min", "2 min", "5
 typedef enum {
     VIEW_CLOSED,
     VIEW_LIST,
+    VIEW_BLUETOOTH,
     VIEW_STATUS,
     VIEW_BATTERY,
     VIEW_POWER,
@@ -146,6 +151,8 @@ static lv_obj_t *s_list;
 static lv_obj_t *s_rows[ITEM_COUNT];
 static lv_obj_t *s_values[ITEM_COUNT];
 static lv_obj_t *s_page;        /* status and power-off confirmation text */
+static lv_obj_t *s_qr;
+static lv_obj_t *s_qr_caption;
 static lv_obj_t *s_hint_down;
 static lv_obj_t *s_hint_select;
 static const char *s_down_text;
@@ -242,11 +249,11 @@ static void status_text(char *buf, size_t n)
     if (p.battery_pct >= 0) {
         snprintf(batt, sizeof(batt), "%d%%%s", p.battery_pct, p.charging ? " +" : "");
     }
-    const char *phone = b.state == MUSE_BLE_OFF ? "Off" : (b.state == MUSE_BLE_CONNECTED ? "Connected" : b.name);
-    snprintf(buf, n, "Wi-Fi %s\nIP    %s\nLink  %s\nMuse  %s\nPhone %s\nPower %s\nVer   %s",
+    const char *ble = b.state == MUSE_BLE_OFF ? "Off" : (b.state == MUSE_BLE_CONNECTED ? "Connected" : b.name);
+    snprintf(buf, n, "Wi-Fi %s\nIP    %s\nLink  %s\nMuse  %s\nBLE   %s\nPower %s\nVer   %s",
              w.state == MUSE_WIFI_CONNECTED ? w.ssid : (w.state == MUSE_WIFI_OFF ? "off" : "offline"),
              w.state == MUSE_WIFI_CONNECTED ? w.ip : "-", muse_link_state_name(muse_link_state()),
-             muse_hatch_state_name(h.state), phone, batt,
+             muse_hatch_state_name(h.state), ble, batt,
              esp_app_get_description()->version);
     muse_text_to_ascii(buf, n);   /* network and phone names can have curly quotes */
 }
@@ -266,7 +273,7 @@ static void battery_text(char *buf, size_t n)
     muse_battery_t b;
     muse_battery_read(&b);
     if (!b.started) {
-        strlcpy(buf, "Unplug USB to\nmeasure how\nlong the\nbattery lasts.", n);
+        strlcpy(buf, "Unplug USB to start\nthe battery runtime test.", n);
         return;
     }
     char t[24], rate[24] = "-", full[24] = "-", wakes[24] = "-", off[24], slept[24], busy[24];
@@ -287,13 +294,14 @@ static void battery_text(char *buf, size_t n)
     pm_text(off, b.screen_off_pm);
     pm_text(slept, b.slept_pm);
     pm_text(busy, b.busy_pm);
-    snprintf(buf, n, "%s %s\nBatt  %d>%d%%\nRate  %s\nFull  %s\nOff   %s\nSleep %s\nWakes %s\nBusy  %s",
-             b.running ? "On batt" : "Last run", t, b.pct_start, b.pct_now, rate, full, off, slept, wakes, busy);
+    snprintf(buf, n, "%s  %s\nLevel  %d%% -> %d%%\nDrain  %s | %s\nScreen off  %s\nSleeping  %s\nWake %s | Busy %s",
+             b.running ? "On battery" : "Last run", t, b.pct_start, b.pct_now,
+             rate, full, off, slept, wakes, busy);
 }
 
 static void refresh(void)
 {
-    char buf[160];
+    char buf[256];
     if (s_view == VIEW_LIST) {
         for (int i = 0; i < ITEM_COUNT; i++) {
             value_text(i, buf, sizeof(buf));
@@ -332,18 +340,31 @@ static void show(view_t view)
     s_shown_sel = -1;
     s_batt_shown_us = 0;
     lv_obj_set_flag(s_list, LV_OBJ_FLAG_HIDDEN, view != VIEW_LIST);
-    lv_obj_set_flag(s_page, LV_OBJ_FLAG_HIDDEN, view == VIEW_LIST);
+    lv_obj_set_flag(s_page, LV_OBJ_FLAG_HIDDEN, view == VIEW_LIST || view == VIEW_BLUETOOTH);
+    lv_obj_set_flag(s_qr, LV_OBJ_FLAG_HIDDEN, view != VIEW_BLUETOOTH);
+    lv_obj_set_flag(s_qr_caption, LV_OBJ_FLAG_HIDDEN, view != VIEW_BLUETOOTH);
     bool danger = view == VIEW_POWER || view == VIEW_RESET;
     lv_obj_set_style_text_color(s_hint_select, lv_color_hex(danger ? COLOR_DANGER : COLOR_TEXT), 0);
 
     switch (view) {
+    case VIEW_BLUETOOTH:
+        set_text(s_title, "BLUETOOTH SETUP");
+        set_text(s_hint_down, "Turn off");
+        set_text(s_hint_select, "Back");
+        break;
     case VIEW_STATUS:
     case VIEW_BATTERY:
+        lv_obj_set_style_text_font(s_page, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_line_space(s_page, 2, 0);
+        lv_label_set_long_mode(s_page, LV_LABEL_LONG_MODE_CLIP);
         set_text(s_title, view == VIEW_STATUS ? "STATUS" : "BATTERY");
         set_text(s_hint_down, "Back");
         set_text(s_hint_select, "Back");
         break;
     case VIEW_POWER: {
+        lv_obj_set_style_text_font(s_page, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_line_space(s_page, 5, 0);
+        lv_label_set_long_mode(s_page, LV_LABEL_LONG_MODE_WRAP);
         char text[96];
         snprintf(text, sizeof(text), "Turn Muse off?\n\nPress the %s button to turn it back on.",
                  muse_board->aux_button);
@@ -354,6 +375,9 @@ static void show(view_t view)
         break;
     }
     case VIEW_RESET:
+        lv_obj_set_style_text_font(s_page, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_line_space(s_page, 5, 0);
+        lv_label_set_long_mode(s_page, LV_LABEL_LONG_MODE_WRAP);
         set_text(s_title, "RESET PAIRING");
         set_text(s_page, "Forget Wi-Fi and the Muse app pairing, then restart?");
         set_text(s_hint_down, "Cancel");
@@ -389,7 +413,12 @@ static void activate(int item)
         muse_settings_set_speaker_on(!muse_settings_speaker_on());
         break;
     case ITEM_BRIGHTNESS:
-        muse_settings_set_brightness(next_step(BRIGHT_STEPS, COUNT(BRIGHT_STEPS), muse_settings_brightness()));
+        {
+            int pct = next_step(BRIGHT_STEPS, COUNT(BRIGHT_STEPS), muse_settings_brightness());
+            /* Apply immediately and make the UI's preview state converge on the saved value. */
+            muse_ui_preview_brightness(pct);
+            muse_settings_set_brightness(pct);
+        }
         break;
     case ITEM_MIC:
         muse_settings_set_mic_gain(next_step(GAIN_STEPS, COUNT(GAIN_STEPS), muse_settings_mic_gain()));
@@ -398,8 +427,9 @@ static void activate(int item)
         muse_settings_set_sleep_s(next_step(SLEEP_STEPS, COUNT(SLEEP_STEPS), muse_settings_sleep_s()));
         break;
     case ITEM_PHONE:
-        muse_settings_set_ble_on(!muse_settings_ble_on());
-        break;
+        muse_settings_set_ble_on(true);
+        show(VIEW_BLUETOOTH);
+        return;
     case ITEM_WIFI:
         muse_settings_set_wifi_on(!muse_settings_wifi_on());
         break;
@@ -431,7 +461,7 @@ static void handle(muse_menu_key_t key)
 {
     switch (s_view) {
     case VIEW_CLOSED:
-        if (key == MUSE_MENU_DOWN) {
+        if (key == MUSE_MENU_OPEN) {
             open_menu();
         }
         break;
@@ -439,7 +469,10 @@ static void handle(muse_menu_key_t key)
         if (key == MUSE_MENU_DOWN) {
             s_sel = (s_sel + 1) % ITEM_COUNT;
             refresh();
-        } else {
+        } else if (key == MUSE_MENU_UP) {
+            s_sel = (s_sel + ITEM_COUNT - 1) % ITEM_COUNT;
+            refresh();
+        } else if (key == MUSE_MENU_SELECT) {
             activate(s_sel);
         }
         break;
@@ -447,8 +480,14 @@ static void handle(muse_menu_key_t key)
     case VIEW_BATTERY:
         show(VIEW_LIST);
         break;
+    case VIEW_BLUETOOTH:
+        if (key == MUSE_MENU_DOWN || key == MUSE_MENU_UP) {
+            muse_settings_set_ble_on(false);
+        }
+        show(VIEW_LIST);
+        break;
     case VIEW_POWER:
-        if (key == MUSE_MENU_DOWN) {
+        if (key == MUSE_MENU_DOWN || key == MUSE_MENU_UP) {
             show(VIEW_LIST);
         } else {
             muse_menu_close();
@@ -456,7 +495,7 @@ static void handle(muse_menu_key_t key)
         }
         break;
     case VIEW_RESET:
-        if (key == MUSE_MENU_DOWN) {
+        if (key == MUSE_MENU_DOWN || key == MUSE_MENU_UP) {
             show(VIEW_LIST);
         } else {
             muse_menu_close();
@@ -501,7 +540,8 @@ void muse_menu_build(lv_obj_t *parent, int w, int h)
 {
     bool small = h < 200 || w < 200;
     const lv_font_t *font = small ? FONT_COMPACT : &lv_font_montserrat_20;
-    const lv_font_t *fine = small ? &lv_font_unscii_8 : &lv_font_unscii_16;
+    const lv_font_t *fine = small ? &lv_font_montserrat_12 : &lv_font_montserrat_14;
+    const lv_font_t *title_font = small ? &lv_font_montserrat_14 : &lv_font_montserrat_20;
     int pad = small ? 2 : 8;
     int title_h = small ? 13 : 40;
     int hint_h = small ? 17 : 44;
@@ -523,7 +563,7 @@ void muse_menu_build(lv_obj_t *parent, int w, int h)
     lv_obj_remove_flag(s_root, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(s_root, LV_OBJ_FLAG_HIDDEN);
 
-    s_title = label(s_root, fine, COLOR_DIM, "MENU");
+    s_title = label(s_root, title_font, COLOR_ACCENT, "MENU");
     lv_obj_set_style_text_letter_space(s_title, 1, 0);
     lv_obj_align(s_title, LV_ALIGN_TOP_MID, 0, small ? 3 : 12);
 
@@ -552,10 +592,29 @@ void muse_menu_build(lv_obj_t *parent, int w, int h)
 
     s_page = label(s_root, fine, COLOR_TEXT, "");
     lv_obj_set_width(s_page, w - 4 * pad - strip);
+    lv_obj_set_height(s_page, h - title_h - hint_h - 2 * pad);
     lv_obj_set_style_text_line_space(s_page, small ? 3 : 8, 0);
     lv_label_set_long_mode(s_page, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_set_pos(s_page, 2 * pad, title_h + pad);
     lv_obj_add_flag(s_page, LV_OBJ_FLAG_HIDDEN);
+
+    /* A phone scans this HTTPS page, then its browser opens the Web Bluetooth
+     * device picker. The QR is deliberately large and high contrast for the
+     * 240x240 Zhengchen panel. */
+    s_qr = lv_qrcode_create(s_root);
+    lv_qrcode_set_size(s_qr, small ? 104 : 128);
+    lv_qrcode_set_dark_color(s_qr, lv_color_black());
+    lv_qrcode_set_light_color(s_qr, lv_color_white());
+    lv_qrcode_set_quiet_zone(s_qr, true);
+    lv_qrcode_update(s_qr, BLUETOOTH_SETUP_URL, strlen(BLUETOOTH_SETUP_URL));
+    lv_obj_set_style_border_color(s_qr, lv_color_white(), 0);
+    lv_obj_set_style_border_width(s_qr, small ? 2 : 4, 0);
+    lv_obj_align(s_qr, LV_ALIGN_TOP_MID, 0, title_h + (small ? 1 : 2));
+    lv_obj_add_flag(s_qr, LV_OBJ_FLAG_HIDDEN);
+
+    s_qr_caption = label(s_root, fine, COLOR_TEXT, "Scan to connect");
+    lv_obj_align(s_qr_caption, LV_ALIGN_TOP_MID, 0, title_h + (small ? 108 : 134));
+    lv_obj_add_flag(s_qr_caption, LV_OBJ_FLAG_HIDDEN);
 
     /* Hints sit next to their buttons, where the face shows their icons. */
     lv_obj_t *rule = lv_obj_create(s_root);

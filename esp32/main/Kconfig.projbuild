@@ -156,99 +156,12 @@ menu "ESP32 Device SDK"
             Uses an internal pull-up and treats a low level as pressed.
             Muse Home Link and the ESP32-C5 DevKitC-1 BOOT button both use GPIO28.
 
-    choice HOMEHUB_LED_BACKEND
-        prompt "Status LED hardware"
-        default HOMEHUB_LED_BACKEND_PWM_RGB
-        help
-            Select the physical status LED implementation for this build. The
-            Muse Home Link board uses a 3-channel PWM RGB LED. A stock
-            ESP32-C5 DevKitC-1 has a single addressable RGB LED on GPIO27.
-            The always-on red power LED on the DevKitC-1 is not firmware
-            controlled. The ideaspark ESP32 board and the SenseCAP Indicator
-            have no status LED; their displays show the status colour in bars
-            along the top and bottom edges, with an animation in between. The
-            Home Assistant Voice PE shows the status colour on its LED ring.
-            The reTerminal E1001 shows a still status screen on its
-            black and white e-paper instead.
-            Boards with the full UI have no status LED; their screen shows Link's pairing
-            and connection state instead.
-
-        config HOMEHUB_LED_BACKEND_PWM_RGB
-            bool "Muse Home Link PWM RGB LED"
-
-        config HOMEHUB_LED_BACKEND_DEVKIT_GPIO27
-            bool "ESP32-C5 DevKitC-1 GPIO27 addressable RGB LED"
-
-        config HOMEHUB_LED_BACKEND_IDEASPARK_ST7789
-            bool "ideaspark ESP32 1.9 inch ST7789 display (status bars)"
-
-        config HOMEHUB_LED_BACKEND_SENSECAP_ST7701
-            bool "SenseCAP Indicator 4 inch ST7701S RGB display (status bars)"
-            depends on IDF_TARGET_ESP32S3 && SPIRAM
-
-        config HOMEHUB_LED_BACKEND_RETERMINAL_UC8179
-            bool "reTerminal E1001 7.5 inch UC8179 e-paper (status screen)"
-            depends on IDF_TARGET_ESP32S3 && SPIRAM
-
-        config HOMEHUB_LED_BACKEND_VOICE_RING
-            bool "Home Assistant Voice PE 12-LED ring"
-            depends on IDF_TARGET_ESP32S3
-
-        config HOMEHUB_LED_BACKEND_MUSE
-            bool "Muse display"
-            depends on MUSE_ENABLED
-
-        config HOMEHUB_LED_BACKEND_NONE
-            bool "No status LED"
-    endchoice
-
-    config HOMEHUB_LED_RGB_ORDER
-        bool "Addressable LED takes red first (RGB order)"
-        depends on HOMEHUB_LED_BACKEND_DEVKIT_GPIO27
-        default y
-        help
-            The LED on Espressif's ESP32-C5 DevKitC-1 (ESP32-C5-WROOM-1) takes
-            red first, unlike the usual WS2812 green first (GRB). Turn this
-            off if your board shows green as red and amber as green.
-
-    config HOMEHUB_DISPLAY
+    config HOMEHUB_LED_BACKEND_MUSE
         bool
-        default y if HOMEHUB_LED_BACKEND_IDEASPARK_ST7789
-        default y if HOMEHUB_LED_BACKEND_SENSECAP_ST7701
-        default y if HOMEHUB_LED_BACKEND_RETERMINAL_UC8179
-        help
-            Set for backends with a display: the status bars, animation and
-            agent name (a still status screen on e-paper), and the display.*
-            commands.
-
-    config HOMEHUB_VOICE
-        bool "Push-to-talk voice chat (Home Assistant Voice PE)"
-        depends on HOMEHUB_LED_BACKEND_VOICE_RING && SPIRAM
         default y
-        help
-            Hold the centre button, speak, release: the audio goes to the
-            agent's chat as a voice note, which the VM transcribes, and the
-            reply appears in the Muse app as text. To speak it, plug a TTS
-            API of your own into start_tts in muse_chat_session.cpp. This
-            uses a second Noise session (Muse's voice session) with Link's
-            account. While the mute
-            switch is on, the button keeps its setup role (tap to confirm
-            pairing, hold to reset).
-
-    config HOMEHUB_SENSECAP_SENSORS
-        bool "SenseCAP Indicator air sensors (sensors.read)"
-        depends on HOMEHUB_LED_BACKEND_SENSECAP_ST7701
-        default y
-        help
-            Read the sensors the RP2040 reports over UART (GPIO 19/20) and
-            answer sensors.read with the latest CO2, tVOC, temperature and
-            humidity. The D1S and D1Pro have CO2 and tVOC built in;
-            temperature and humidity need the Grove AHT20. Needs Seeed's stock
-            RP2040 firmware.
 
     config HOMEHUB_DISPLAY_COMMANDS
         bool
-        default y if HOMEHUB_DISPLAY
         default y if HOMEHUB_LED_BACKEND_MUSE && SPIRAM
         help
             Set when display.draw_url can draw a downloaded image: the

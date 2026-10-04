@@ -23,7 +23,7 @@
 #include "esp_err.h"
 
 /*
- * BLE "phone setup" service. Home Link owns the NimBLE stack and advertises as
+ * BLE setup service. Home Link owns the NimBLE stack and advertises as
  * "Muse-XXXXXX"; this adds one GATT service to Link's server:
  *
  *   CMD    (write)       "key=value" text: wifi.ssid, wifi.pass, wifi.connect,
