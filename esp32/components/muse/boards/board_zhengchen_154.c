@@ -23,6 +23,7 @@
  */
 #include <limits.h>
 
+#include "driver/gpio.h"
 #include "driver/i2s_std.h"
 #include "driver/ledc.h"
 #include "driver/spi_master.h"
@@ -188,6 +189,24 @@ static bool display_lock(int timeout_ms)
 
 static void set_brightness(int pct)
 {
+    pct = pct < 0 ? 0 : pct > 100 ? 100 : pct;
+    if (pct == 0) {
+        /* ledc_stop() disables the PWM signal, which can leave this pad floating
+         * on the S3's shared USB-D+ GPIO. Detach it from LEDC and drive it as a
+         * plain output so the active-high backlight is physically held off. */
+        ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+        gpio_reset_pin(LCD_BL);
+        gpio_set_level(LCD_BL, 0);
+        gpio_set_direction(LCD_BL, GPIO_MODE_OUTPUT);
+        gpio_set_level(LCD_BL, 0);
+        gpio_hold_en(LCD_BL);
+        return;
+    }
+
+    gpio_hold_dis(LCD_BL);
+    /* set_brightness(0) deliberately detached the pin from LEDC. Route the
+     * channel back to GPIO20 before restoring a non-zero duty. */
+    ledc_set_pin(LCD_BL, LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, pct * 1023 / 100);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
