@@ -60,6 +60,9 @@ typedef struct {
 /* Starts the connection task; it connects once Wi-Fi is up. */
 void muse_hatch_start(void);
 
+/* A local device token or a paired Link account is available. */
+bool muse_hatch_configured(void);
+
 /* The session task connects once Wi-Fi is up, and again whenever a turn needs it. */
 void muse_hatch_status(muse_hatch_status_t *out);
 /* (Re)connects to the VM and reports the result in the status. */

@@ -24,6 +24,7 @@
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
 #if CONFIG_PM_ENABLE
@@ -61,7 +62,7 @@ static const char *TAG = "muse_input";
 #define GOODBYE_MS 1500        /* let the goodbye animation play */
 #define HINT_TICKS 60          /* 0.6 s: warn that holding powers off */
 #define LONG_TICKS 150         /* 1.5 s: power off */
-#define TALK_HOLD_TICKS 150    /* 1.5 s: hold BOOT to start listening */
+#define TALK_HOLD_US 1500000LL /* 1.5 s: hold BOOT to start listening */
 #define SLEEP_CHECK_MS 100
 
 #define SERIAL_RX 1024         /* the driver drops what doesn't fit, so a console line must */
@@ -208,7 +209,7 @@ static void aux_key(muse_menu_key_t key, bool pressed, bool edge)
  * 1.5 second hold starts listening, and a press while listening stops early. */
 static void talk_button(unsigned ev)
 {
-    static int held;
+    static int64_t pressed_us;
     static bool hold_started;
     static bool consumed;
     static bool menu_at_press;
@@ -216,7 +217,7 @@ static void talk_button(unsigned ev)
 
     if (!s_talk_down && (ev & MUSE_BTN_TALK_PRESS)) {
         s_talk_down = true;
-        held = 0;
+        pressed_us = esp_timer_get_time();
         hold_started = false;
         consumed = false;
         menu_at_press = muse_menu_is_open();
@@ -236,10 +237,28 @@ static void talk_button(unsigned ev)
         }
     }
 
-    if (s_talk_down && !released && !consumed && !menu_at_press && !hold_started) {
-        if (++held >= TALK_HOLD_TICKS) {
+    if (s_talk_down && !released && !consumed && !hold_started) {
+        int64_t held_us = esp_timer_get_time() - pressed_us;
+        if (held_us >= TALK_HOLD_US) {
             muse_state_poke();
-            post(MUSE_PTT_DOWN, false);
+            if (menu_at_press) {
+                /* Closing LVGL objects belongs to the UI task. */
+                muse_menu_key(MUSE_MENU_CLOSE);
+            }
+            ESP_LOGI(TAG, "talk hold reached after %lld ms", held_us / 1000);
+            if (!muse_hatch_configured()) {
+                /* The SDK token identifies this gadget during pairing; it is
+                 * not the account/device credential required for chat. */
+                ESP_LOGW(TAG, "talk unavailable: Muse account is not provisioned");
+                muse_state_set_mode(MUSE_MODE_IDLE);
+                muse_state_set_caption("PAIR MUSE ACCOUNT FIRST");
+            } else {
+                /* Give immediate visual feedback; the voice task will either
+                 * keep listening or replace this with a network error. */
+                muse_state_set_mode(MUSE_MODE_LISTENING);
+                muse_state_set_caption("LISTENING...");
+                post(MUSE_PTT_DOWN, false);
+            }
             hold_started = true;
         }
     }
@@ -250,7 +269,7 @@ static void talk_button(unsigned ev)
             muse_menu_key(menu_at_press ? MUSE_MENU_SELECT : MUSE_MENU_OPEN);
         }
         s_talk_down = false;
-        held = 0;
+        pressed_us = 0;
         hold_started = false;
         consumed = false;
     }

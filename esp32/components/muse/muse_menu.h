@@ -30,6 +30,7 @@ typedef enum {
     MUSE_MENU_UP,
     MUSE_MENU_DOWN,
     MUSE_MENU_SELECT,
+    MUSE_MENU_CLOSE,
 } muse_menu_key_t;
 
 /* Safe from any task. */

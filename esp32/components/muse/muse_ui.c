@@ -941,8 +941,9 @@ static void build_screen(void)
         lv_obj_set_style_bg_color(s_caption_lbl, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(s_caption_lbl, LV_OPA_70, 0);
         lv_label_set_long_mode(s_caption_lbl, LV_LABEL_LONG_MODE_DOTS);
-        /* Touch screens need the caption above the navigation dots too. */
-        lv_obj_align(s_caption_lbl, LV_ALIGN_BOTTOM_MID, 0, (s_tall || s_tv) ? -30 : -3);
+        /* Keep captions above navigation dots or the physical-button hints. */
+        bool raised_caption = s_tall || s_tv || !muse_board->touch;
+        lv_obj_align(s_caption_lbl, LV_ALIGN_BOTTOM_MID, 0, raised_caption ? -30 : -3);
 
         s_bar = lv_obj_create(face);
         lv_obj_remove_style_all(s_bar);
@@ -1548,7 +1549,8 @@ esp_err_t muse_ui_start(void)
     /* The full layout assumes room for the 466 px board's header and bottom
      * captions. Short landscape panels (BOX-3) need the compact layout too. */
     bool short_landscape = s_w > s_h && s_h < 320;
-    s_small = s_h < 200 || s_w < 200 || short_landscape;
+    bool compact_square = s_w <= 240 && s_h <= 240;
+    s_small = s_h < 200 || s_w < 200 || short_landscape || compact_square;
     s_tall = s_small && s_h >= s_w + 64;
     /* Small screens keep room for the status line and button icons. A narrow
      * one is as wide as Muse gets, in whole pixels. */

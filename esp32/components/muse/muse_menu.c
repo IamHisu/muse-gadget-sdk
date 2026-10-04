@@ -46,6 +46,7 @@ static const char *TAG = "muse_menu";
 #define COLOR_SELECTED 0x2e2552
 #define COLOR_RULE 0x2a2345
 #define COLOR_DANGER 0xff5c5c
+#define COLOR_WARNING 0xffa43a
 
 /* Hosted from this repository with GitHub Pages. Web Bluetooth requires HTTPS. */
 #define BLUETOOTH_SETUP_URL "https://iamhisu.github.io/muse-gadget-sdk/esp32/tools/muse/ble_setup.html"
@@ -719,6 +720,10 @@ static void scroll_page(int pixels)
 
 static void handle(muse_menu_key_t key)
 {
+    if (key == MUSE_MENU_CLOSE) {
+        muse_menu_close();
+        return;
+    }
     switch (s_view) {
     case VIEW_CLOSED:
         if (key == MUSE_MENU_OPEN) {
@@ -859,7 +864,9 @@ void muse_menu_build(lv_obj_t *parent, int w, int h)
         lv_obj_set_style_radius(r, small ? 3 : 8, 0);
         lv_obj_set_style_bg_color(r, lv_color_hex(COLOR_SELECTED), 0);
         lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-        uint32_t color = i == ITEM_POWER ? COLOR_DANGER : COLOR_TEXT;
+        uint32_t color = i == ITEM_POWER ? COLOR_DANGER
+                         : i == ITEM_SLEEP_NOW ? COLOR_WARNING
+                                              : COLOR_TEXT;
         lv_obj_align(label(r, font, color, ITEM_NAMES[i]), LV_ALIGN_LEFT_MID, 0, 0);
         s_values[i] = label(r, font, COLOR_ACCENT, "");
         lv_obj_align(s_values[i], LV_ALIGN_RIGHT_MID, 0, 0);
