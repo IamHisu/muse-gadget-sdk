@@ -73,3 +73,5 @@ void muse_ble_forget_all(void);
 void muse_ble_command(char *cmd);
 /* The STATUS characteristic's JSON; returns its length, as snprintf does. */
 int muse_ble_status_json(char *out, size_t len);
+/* The NETWORKS characteristic JSON, also used by the local Wi-Fi setup page. */
+int muse_ble_networks_json(char *out, size_t len);

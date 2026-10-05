@@ -30,6 +30,7 @@
 #include "muse_state.h"
 #include "muse_ui.h"
 #include "muse_voice.h"
+#include "muse_web.h"
 #include "muse_wifi.h"
 
 static const char *TAG = "muse";
@@ -90,6 +91,9 @@ void muse_app_run(const muse_board_t *board)
     /* Home Link owns the radios; these just hand it the saved settings. */
     muse_wifi_apply();
     muse_ble_apply();
+    if (muse_web_start() != ESP_OK) {
+        ESP_LOGW(TAG, "local Hisu setup page unavailable");
+    }
     ESP_LOGI(TAG, "ready: free heap %u internal, %u psram",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));

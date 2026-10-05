@@ -480,6 +480,21 @@ static void refresh(void)
     }
 }
 
+static void update_setup_qr(void)
+{
+    char url[64];
+    muse_wifi_status_t wifi;
+    muse_wifi_status(&wifi);
+    if (wifi.state == MUSE_WIFI_CONNECTED && wifi.ip[0]) {
+        snprintf(url, sizeof(url), "http://%s/", wifi.ip);
+        set_text(s_qr_caption, "Open over Wi-Fi");
+    } else {
+        strlcpy(url, BLUETOOTH_SETUP_URL, sizeof(url));
+        set_text(s_qr_caption, "Scan to connect");
+    }
+    lv_qrcode_update(s_qr, url, strlen(url));
+}
+
 static void show(view_t view)
 {
     s_view = view;
@@ -513,7 +528,8 @@ static void show(view_t view)
 
     switch (view) {
     case VIEW_BLUETOOTH:
-        set_text(s_title, "BLUETOOTH SETUP");
+        update_setup_qr();
+        set_text(s_title, "HISU SETUP");
         set_text(s_hint_select, "Back");
         break;
     case VIEW_WIFI:

@@ -817,6 +817,9 @@ static void build_screen(void)
         s_settings = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_LEFT);
         face = s_face;
     }
+    /* Non-touch boards draw directly on the active screen. Keep the same
+     * parent for uploaded wallpaper instead of creating an inactive screen. */
+    s_face = face;
 
     if (!s_small && muse_board->round) {
         /* Round panels use the bezel as a progress ring. */
@@ -895,6 +898,7 @@ static void build_screen(void)
     lv_obj_set_style_line_width(s_bt_slash, 3, 0);
     lv_obj_set_style_line_rounded(s_bt_slash, true, 0);
     lv_obj_set_style_line_color(s_bt_slash, lv_color_hex(0xff554d), 0);
+    lv_obj_add_flag(bt_box, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t *wifi_box = lv_obj_create(status);
     lv_obj_remove_style_all(wifi_box);
@@ -909,6 +913,7 @@ static void build_screen(void)
     lv_obj_set_style_line_width(s_wifi_slash, 3, 0);
     lv_obj_set_style_line_rounded(s_wifi_slash, true, 0);
     lv_obj_set_style_line_color(s_wifi_slash, lv_color_hex(0xff554d), 0);
+    lv_obj_add_flag(wifi_box, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t *battery = lv_obj_create(status);
     lv_obj_remove_style_all(battery);
@@ -1027,8 +1032,8 @@ static void image_hide_locked(void)
     xSemaphoreGive(s_image_mutex);
 }
 
-/* With the display lock held. Uploaded media is a real background: it stays
- * behind the avatar, status icons and menus until the web page clears it. */
+/* With the display lock held. Wallpaper replaces the avatar on the idle
+ * screen while status icons and menus stay above it. */
 static void wallpaper_clear_locked(void)
 {
     if (s_wallpaper) {
@@ -1038,6 +1043,9 @@ static void wallpaper_clear_locked(void)
     memset(&s_wallpaper_dsc, 0, sizeof(s_wallpaper_dsc));
     heap_caps_free(s_wallpaper_data);
     s_wallpaper_data = NULL;
+    if (s_canvas) {
+        lv_obj_remove_flag(s_canvas, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 /* Each frame: shows a new image and redraws what the download changed. */
@@ -1069,13 +1077,30 @@ static void image_sync(void)
             s_wallpaper_dsc.data = uploaded;
             s_wallpaper = lv_gif_create(s_face);
             if (s_wallpaper) {
-                s_wallpaper_data = uploaded;
                 lv_gif_set_color_format(s_wallpaper, LV_COLOR_FORMAT_RGB565);
                 lv_gif_set_src(s_wallpaper, &s_wallpaper_dsc);
+            }
+            if (s_wallpaper && lv_gif_is_loaded(s_wallpaper)) {
+                s_wallpaper_data = uploaded;
+                /* Keep all animation frames and let LVGL scale the decoded
+                 * canvas down to the panel instead of rejecting a large GIF. */
+                uint32_t gif_w = (uint32_t)uploaded[6] | ((uint32_t)uploaded[7] << 8);
+                uint32_t gif_h = (uint32_t)uploaded[8] | ((uint32_t)uploaded[9] << 8);
+                if (gif_w > (uint32_t)s_w || gif_h > (uint32_t)s_h) {
+                    uint32_t sx = (uint32_t)s_w * LV_SCALE_NONE / gif_w;
+                    uint32_t sy = (uint32_t)s_h * LV_SCALE_NONE / gif_h;
+                    lv_image_set_scale(s_wallpaper, LV_MAX(1U, LV_MIN(sx, sy)));
+                }
                 lv_obj_center(s_wallpaper);
                 lv_obj_move_to_index(s_wallpaper, 0);
+                lv_obj_add_flag(s_canvas, LV_OBJ_FLAG_HIDDEN);
                 muse_state_set_asleep(false);
             } else {
+                if (s_wallpaper) {
+                    lv_obj_delete(s_wallpaper);
+                    s_wallpaper = NULL;
+                }
+                memset(&s_wallpaper_dsc, 0, sizeof(s_wallpaper_dsc));
                 heap_caps_free(uploaded);
             }
         } else if (uploaded) {
@@ -1100,6 +1125,7 @@ static void image_sync(void)
                 lv_image_set_src(s_wallpaper, &s_wallpaper_dsc);
                 lv_obj_set_pos(s_wallpaper, 0, 0);
                 lv_obj_move_to_index(s_wallpaper, 0);
+                lv_obj_add_flag(s_canvas, LV_OBJ_FLAG_HIDDEN);
                 muse_state_set_asleep(false);
             } else {
                 heap_caps_free(uploaded);
@@ -1319,18 +1345,20 @@ static void update_chrome(float now)
         muse_settings_ui_tick(lv_obj_get_scroll_x(s_tv) > 0);
     }
 
-    /* Wi-Fi is always visible. Disconnected/connecting gets a slash over it. */
+    /* Connectivity icons appear only while their link is connected. */
     muse_wifi_status_t w;
     muse_wifi_status(&w);
     bool wifi_connected = w.state == MUSE_WIFI_CONNECTED;
-    lv_obj_set_style_text_color(s_wifi_icon, lv_color_hex(wifi_connected ? COLOR_ACCENT : COLOR_DIM), 0);
-    lv_obj_set_flag(s_wifi_slash, LV_OBJ_FLAG_HIDDEN, wifi_connected);
+    lv_obj_set_style_text_color(s_wifi_icon, lv_color_hex(COLOR_ACCENT), 0);
+    lv_obj_add_flag(s_wifi_slash, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_flag(lv_obj_get_parent(s_wifi_icon), LV_OBJ_FLAG_HIDDEN, !wifi_connected);
     s_idle_name = idle_name(w.state);
     muse_ble_status_t b;
     muse_ble_status(&b);
     bool bt_connected = b.state == MUSE_BLE_CONNECTED;
-    lv_obj_set_style_text_color(s_bt_icon, lv_color_hex(bt_connected ? COLOR_ACCENT : COLOR_DIM), 0);
-    lv_obj_set_flag(s_bt_slash, LV_OBJ_FLAG_HIDDEN, bt_connected);
+    lv_obj_set_style_text_color(s_bt_icon, lv_color_hex(COLOR_ACCENT), 0);
+    lv_obj_add_flag(s_bt_slash, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_flag(lv_obj_get_parent(s_bt_icon), LV_OBJ_FLAG_HIDDEN, !bt_connected);
 
     /* Paired, the name has done its job (picking this one out in the Muse
      * app) and the speaker button has replies to mute. */
@@ -1809,7 +1837,8 @@ void muse_ui_image_hide(void)
 bool muse_ui_wallpaper_submit(uint8_t *data, size_t size, bool gif)
 {
     if (!s_ready || !data || (!gif && size != (size_t)s_w * s_h * 2) ||
-        (gif && (size < 6 || size > 1024 * 1024 || memcmp(data, "GIF8", 4) != 0))) {
+        (gif && (size < 10 || size > 1024 * 1024 || memcmp(data, "GIF8", 4) != 0 ||
+                 (data[6] == 0 && data[7] == 0) || (data[8] == 0 && data[9] == 0)))) {
         return false;
     }
     xSemaphoreTake(s_image_mutex, portMAX_DELAY);

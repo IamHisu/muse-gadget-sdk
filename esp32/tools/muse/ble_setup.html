@@ -48,6 +48,8 @@
     font-size:16px; font-weight:600; margin:12px 8px 0 0; cursor:pointer;
   }
   button.secondary { background:#2e2552; color:var(--text); }
+  .button-link { display:inline-block; text-decoration:none; background:var(--ok); color:#071b14; border-radius:12px;
+    padding:10px 16px; font-size:16px; font-weight:600; margin:12px 8px 0 0; }
   button:disabled { opacity:.4; cursor:default; }
   .row { display:flex; justify-content:space-between; gap:12px; }
   .wifi-row { display:flex; align-items:center; gap:8px; }
@@ -76,6 +78,7 @@
     <div class="row"><h2 style="margin:0">Device</h2><span id="conn" class="dim">Not connected</span></div>
     <button id="connect">Connect</button>
     <button id="disconnect" class="secondary" disabled>Disconnect</button>
+    <a id="wifi-open" class="button-link hidden" href="#">Open over Wi-Fi</a>
     <div id="status" class="dim" style="margin-top:12px"></div>
   </section>
 
@@ -111,7 +114,7 @@
       </label>
       <img id="preview" class="hidden" alt="Wallpaper preview">
       <progress id="upload-progress" class="hidden" max="100" value="0"></progress>
-      <div id="upload-state" class="dim" style="margin-top:8px">JPG and PNG are fitted to 240×240. GIF must be no larger than 240×240 and 1 MB.</div>
+      <div id="upload-state" class="dim" style="margin-top:8px">JPG, PNG and GIF are fitted to 240×240. GIF files may be up to 1 MB.</div>
       <button id="wallpaper-clear" class="secondary" type="button">Show Hisu</button>
     </section>
 
@@ -143,11 +146,11 @@ const SVC    = '4d757365-0001-4000-8000-6a6f6c6c7900';
 const CMD    = '4d757365-0002-4000-8000-6a6f6c6c7900';
 const STATUS = '4d757365-0003-4000-8000-6a6f6c6c7900';
 const NETWORKS = '4d757365-0004-4000-8000-6a6f6c6c7900';
-const MEDIA = '4d757365-0005-4000-8000-6a6f6c6c7900';
-const MEDIA_CHUNK = 180;   // safe with the 256-byte MTU used by the board
+const WIFI_MODE = location.protocol === 'http:' && !['localhost', '127.0.0.1'].includes(location.hostname);
 
 const $ = id => document.getElementById(id);
-let device, cmdChar, statusChar, networksChar, mediaChar;
+let device, cmdChar, statusChar, networksChar;
+let wifiSetupUrl = '';
 let scanRunning = false;
 let uploadRunning = false;
 let previewUrl;
@@ -173,18 +176,41 @@ function send(cmd, value = '') {
     .catch(e => log(`${cmd} failed: ${e.message}`, 'bad'));
 }
 
-function writeCommand(cmd, value = '') {
+async function writeCommand(cmd, value = '') {
+  if (WIFI_MODE) {
+    const response = await fetch('/api/command', {
+      method: 'POST', headers: {'Content-Type': 'text/plain'}, body: `${cmd}=${value}`, cache: 'no-store'
+    });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return;
+  }
   return gatt(() => cmdChar.writeValueWithResponse(new TextEncoder().encode(`${cmd}=${value}`)));
 }
 
 async function refresh() {
-  const v = await gatt(() => statusChar.readValue());
-  const s = JSON.parse(new TextDecoder().decode(v));
+  let s;
+  if (WIFI_MODE) {
+    const response = await fetch('/api/status', {cache: 'no-store'});
+    if (!response.ok) throw new Error(`Status HTTP ${response.status}`);
+    s = await response.json();
+  } else {
+    const v = await gatt(() => statusChar.readValue());
+    s = JSON.parse(new TextDecoder().decode(v));
+  }
   const w = s.wifi;
   $('conn').textContent = `${s.name} · fw ${s.fw}`;
   $('status').innerHTML =
     `Wi-Fi: <b>${w.on ? esc(w.state) : 'off'}</b>${w.ssid ? ` (${esc(w.ssid)}${w.ip ? `, ${esc(w.ip)}` : ''})` : ''}<br>` +
     (s.battery >= 0 ? `Battery ${s.battery}%` : 'Battery: n/a');
+  const wifiOpen = $('wifi-open');
+  if (!WIFI_MODE && w.state === 'connected' && w.ip) {
+    wifiSetupUrl = `http://${w.ip}/`;
+    wifiOpen.href = wifiSetupUrl;
+    wifiOpen.classList.remove('hidden');
+  } else {
+    if (!WIFI_MODE) wifiSetupUrl = '';
+    wifiOpen.classList.add('hidden');
+  }
   if (document.activeElement !== $('ssid') && !$('ssid').value) $('ssid').value = w.ssid || '';
   setRange('volume', s.volume, v => `${v}%`);
   if (document.activeElement !== $('speaker')) $('speaker').checked = s.speaker;
@@ -196,6 +222,11 @@ async function refresh() {
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 async function readNetworks() {
+  if (WIFI_MODE) {
+    const response = await fetch('/api/networks', {cache: 'no-store'});
+    if (!response.ok) throw new Error(`Wi-Fi scan HTTP ${response.status}`);
+    return response.json();
+  }
   const v = await gatt(() => networksChar.readValue());
   return JSON.parse(new TextDecoder().decode(v));
 }
@@ -285,7 +316,6 @@ async function connect() {
     $('connect').disabled = false;
     $('disconnect').disabled = true;
     networksChar = undefined;
-    mediaChar = undefined;
     gattQueue = Promise.resolve();
     scanRunning = false;
   });
@@ -299,12 +329,6 @@ async function connect() {
   } catch (e) {
     networksChar = undefined;
     log('Wi-Fi scan service is not visible. Remove this device from Bluetooth settings, then pair again.', 'bad');
-  }
-  try {
-    mediaChar = await svc.getCharacteristic(MEDIA);
-  } catch (e) {
-    mediaChar = undefined;
-    log('Wallpaper upload needs the latest Hisu firmware.', 'bad');
   }
   // The first protected read triggers pairing: enter the code shown on Muse.
   log('Pairing: enter the code shown on Muse if asked');
@@ -345,8 +369,8 @@ $('wifi-join').onclick = async () => {
   const selected = $('ssid-list').value;
   const ssid = selected === '__manual__' ? $('ssid').value.trim() : selected;
   if (!ssid) { log('Choose a network', 'bad'); return; }
-  send('wifi.ssid', ssid);
-  send('wifi.pass', $('pass').value);   // always sent, so an open network clears the old password
+  await send('wifi.ssid', ssid);
+  await send('wifi.pass', $('pass').value);   // always sent, so an open network clears the old password
   await send('wifi.connect');
   $('pass').value = '';
 };
@@ -357,10 +381,23 @@ $('wifi-forget').onclick = () => {
   send('wifi.forget');
 };
 
+function activateTab(tabName) {
+  document.querySelectorAll('.tab').forEach(tab => tab.classList.toggle('active', tab.dataset.tab === tabName));
+  document.querySelectorAll('.panel').forEach(panel => panel.classList.toggle('active', panel.id === tabName));
+}
+
 for (const tab of document.querySelectorAll('.tab')) {
   tab.onclick = () => {
-    document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === tab));
-    document.querySelectorAll('.panel').forEach(x => x.classList.toggle('active', x.id === tab.dataset.tab));
+    if (tab.dataset.tab === 'display' && !WIFI_MODE) {
+      if (wifiSetupUrl) {
+        location.assign(`${wifiSetupUrl}#display`);
+      } else {
+        log('Connect Hisu to Wi-Fi before opening Display.', 'bad');
+        $('status').innerHTML += '<br><span class="bad">Connect Wi-Fi first, then open Display again.</span>';
+      }
+      return;
+    }
+    activateTab(tab.dataset.tab);
   };
 }
 
@@ -394,11 +431,27 @@ function fittedRgb565(image) {
   return bytes;
 }
 
+function uploadOverWifi(bytes, gif) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('POST', `/api/wallpaper?type=${gif ? 'gif' : 'still'}`);
+    request.setRequestHeader('Content-Type', 'application/octet-stream');
+    request.upload.onprogress = event => {
+      if (event.lengthComputable) $('upload-progress').value = Math.round(event.loaded * 100 / event.total);
+    };
+    request.onload = () => request.status >= 200 && request.status < 300
+      ? resolve() : reject(new Error(request.responseText || `HTTP ${request.status}`));
+    request.onerror = () => reject(new Error('Wi-Fi upload disconnected.'));
+    request.send(bytes);
+  });
+}
+
 async function uploadWallpaper(file) {
-  if (uploadRunning || !mediaChar) {
-    if (!mediaChar) $('upload-state').textContent = 'Connect to a board with the latest firmware first.';
+  if (!WIFI_MODE) {
+    $('upload-state').textContent = 'Open Display over Wi-Fi to upload a wallpaper.';
     return;
   }
+  if (uploadRunning) return;
   const gif = file.type === 'image/gif' || /\.gif$/i.test(file.name);
   const still = /image\/(jpeg|png)/.test(file.type) || /\.(jpe?g|png)$/i.test(file.name);
   if (!gif && !still) {
@@ -421,18 +474,9 @@ async function uploadWallpaper(file) {
     $('preview').src = previewUrl;
     $('preview').classList.remove('hidden');
     const image = await loadImage(previewUrl);
-    if (gif && (image.naturalWidth > 240 || image.naturalHeight > 240)) {
-      throw new Error('GIF dimensions must be no larger than 240×240.');
-    }
     const bytes = gif ? new Uint8Array(await file.arrayBuffer()) : fittedRgb565(image);
-    await writeCommand('media.begin', `${gif ? 'gif' : 'still'},${bytes.byteLength}`);
-    $('upload-state').textContent = 'Sending to Hisu…';
-    for (let offset = 0; offset < bytes.length; offset += MEDIA_CHUNK) {
-      const chunk = bytes.subarray(offset, Math.min(offset + MEDIA_CHUNK, bytes.length));
-      await gatt(() => mediaChar.writeValueWithResponse(chunk));
-      $('upload-progress').value = Math.round((offset + chunk.length) * 100 / bytes.length);
-    }
-    await writeCommand('media.commit');
+    $('upload-state').textContent = 'Sending over Wi-Fi…';
+    await uploadOverWifi(bytes, gif);
     $('upload-state').textContent = 'Wallpaper is now shown on Hisu.';
     log(`Uploaded ${gif ? 'GIF' : 'image'} (${Math.round(bytes.length / 1024)} KB)`, 'ok');
   } catch (e) {
@@ -464,8 +508,19 @@ $('sleep').onchange = () => send('sleep', $('sleep').value);
 
 // Keep device state fresh while connected (skipped during long GATT operations).
 setInterval(() => {
-  if (device?.gatt.connected && !$('controls').disabled && !scanRunning && !uploadRunning) refresh().catch(() => {});
+  if ((WIFI_MODE || device?.gatt.connected) && !$('controls').disabled && !scanRunning && !uploadRunning) refresh().catch(() => {});
 }, 3000);
+
+if (WIFI_MODE) {
+  $('connect').classList.add('hidden');
+  $('disconnect').classList.add('hidden');
+  $('conn').textContent = 'Connected over Wi-Fi';
+  $('controls').disabled = false;
+  networksChar = true;
+  if (location.hash === '#display') activateTab('display');
+  refresh().then(scanWifi).catch(error => log(error.message, 'bad'));
+  log('Using fast local Wi-Fi connection', 'ok');
+}
 </script>
 </body>
 </html>

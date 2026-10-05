@@ -297,6 +297,11 @@ int muse_ble_status_json(char *out, size_t len)
     return build_status(out, len);
 }
 
+int muse_ble_networks_json(char *out, size_t len)
+{
+    return build_networks(out, len);
+}
+
 static int on_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     (void)conn;
