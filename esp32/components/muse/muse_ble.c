@@ -21,6 +21,7 @@
 #include <string.h>
 
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "host/ble_hs.h"
@@ -30,12 +31,15 @@
 #include "muse_link.h"
 #include "muse_settings.h"
 #include "muse_state.h"
+#include "muse_ui.h"
 #include "muse_voice.h"
 #include "muse_wifi.h"
 
 static const char *TAG = "muse_ble";
 
 #define CMD_MAX 600
+#define MEDIA_STILL_BYTES (240 * 240 * 2)
+#define MEDIA_GIF_MAX (1024 * 1024)
 
 void ble_store_config_init(void);
 
@@ -45,6 +49,7 @@ static const ble_uuid128_t SVC_UUID = MUSE_UUID(0x01);
 static const ble_uuid128_t CMD_UUID = MUSE_UUID(0x02);
 static const ble_uuid128_t STATUS_UUID = MUSE_UUID(0x03);
 static const ble_uuid128_t NETWORKS_UUID = MUSE_UUID(0x04);
+static const ble_uuid128_t MEDIA_UUID = MUSE_UUID(0x05);
 
 static uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_status_handle;
@@ -52,6 +57,10 @@ static volatile uint32_t s_passkey;
 static volatile bool s_secure;
 static char s_name[32];   /* the whole "MuseGadget-XXXXXX", not a prefix of it */
 static char s_last[64] = "ready";
+static uint8_t *s_media;
+static size_t s_media_expected;
+static size_t s_media_received;
+static bool s_media_gif;
 
 /* ---- commands ---- */
 
@@ -154,6 +163,15 @@ static bool parse_int(const char *v, int lo, int hi, int *out)
 static char s_pending_ssid[MUSE_SSID_MAX + 1];
 static char s_pending_pass[MUSE_PASS_MAX + 1];
 
+static void media_cancel(void)
+{
+    heap_caps_free(s_media);
+    s_media = NULL;
+    s_media_expected = 0;
+    s_media_received = 0;
+    s_media_gif = false;
+}
+
 static void run_command(char *cmd)
 {
     char *v = strchr(cmd, '=');
@@ -190,6 +208,42 @@ static void run_command(char *cmd)
         } else {
             muse_settings_set_wifi("", "");   /* every saved network */
         }
+    } else if (!strcmp(cmd, "media.begin")) {
+        char kind[8];
+        int bytes = 0;
+        if (sscanf(v, "%7[^,],%d", kind, &bytes) != 2 || bytes <= 0 ||
+            ((!strcmp(kind, "still") && bytes != MEDIA_STILL_BYTES) ||
+             (!strcmp(kind, "gif") && bytes > MEDIA_GIF_MAX) ||
+             (strcmp(kind, "still") && strcmp(kind, "gif")))) {
+            res = "error: invalid image";
+        } else {
+            media_cancel();
+            s_media = heap_caps_malloc((size_t)bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (!s_media) {
+                res = "error: not enough memory";
+            } else {
+                s_media_expected = (size_t)bytes;
+                s_media_gif = !strcmp(kind, "gif");
+                res = "ready";
+            }
+        }
+    } else if (!strcmp(cmd, "media.commit")) {
+        if (!s_media || s_media_received != s_media_expected) {
+            res = "error: incomplete image";
+        } else if (!muse_ui_wallpaper_submit(s_media, s_media_expected, s_media_gif)) {
+            res = "error: unsupported image";
+            media_cancel();
+        } else {
+            s_media = NULL;   /* UI owns it now */
+            s_media_expected = 0;
+            s_media_received = 0;
+            s_media_gif = false;
+            res = "shown";
+        }
+    } else if (!strcmp(cmd, "media.clear")) {
+        media_cancel();
+        muse_ui_wallpaper_clear();
+        res = "cleared";
     } else if (!strcmp(cmd, "hatch.host")) {
         muse_settings_set_hatch_host(v);   /* accepted for the already-published setup page */
     } else if (!strcmp(cmd, "hatch.vm")) {
@@ -287,6 +341,25 @@ static int on_networks_access(uint16_t conn, uint16_t attr, struct ble_gatt_acce
     return os_mbuf_append(ctxt->om, buf, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
+static int on_media_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn;
+    (void)attr;
+    (void)arg;
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR || !s_media) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    uint16_t chunk = OS_MBUF_PKTLEN(ctxt->om);
+    if (!chunk || s_media_received + chunk > s_media_expected) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    if (os_mbuf_copydata(ctxt->om, 0, chunk, s_media + s_media_received) != 0) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    s_media_received += chunk;
+    return 0;
+}
+
 static const struct ble_gatt_svc_def SERVICES[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -308,6 +381,12 @@ static const struct ble_gatt_svc_def SERVICES[] = {
                 .uuid = &NETWORKS_UUID.u,
                 .access_cb = on_networks_access,
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_READ_AUTHEN,
+            },
+            {
+                .uuid = &MEDIA_UUID.u,
+                .access_cb = on_media_access,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP |
+                         BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_WRITE_AUTHEN,
             },
             { 0 },
         },
@@ -354,6 +433,7 @@ int muse_ble_gap_event(struct ble_gap_event *ev)
         }
         break;
     case BLE_GAP_EVENT_DISCONNECT:
+        media_cancel();
         s_conn = BLE_HS_CONN_HANDLE_NONE;
         s_passkey = 0;
         s_secure = false;

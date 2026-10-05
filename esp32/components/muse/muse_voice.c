@@ -44,8 +44,8 @@ static const char *TAG = "muse_voice";
 #define MANUAL_TAIL_FRAMES (MUSE_AUDIO_RATE * 12 / 100) /* keep the last syllable after a stop tap */
 #define MAX_FRAMES (MUSE_AUDIO_RATE * MAX_SECS)
 #define NO_SPEECH_FRAMES (MUSE_AUDIO_RATE * 5)       /* stop if nobody starts speaking */
-#define SPEECH_START_DBFS (-45.0f)                   /* three loud chunks start a phrase */
-#define SPEECH_CONTINUE_DBFS (-48.0f)                /* hysteresis while the phrase is active */
+#define SPEECH_START_DBFS (-60.0f)                   /* Zhengchen mic: three clear chunks start a phrase */
+#define SPEECH_CONTINUE_DBFS (-64.0f)                /* stay well above its roughly -75 dBFS noise floor */
 #define SPEECH_START_CHUNKS 3                        /* 60 ms rejects the button click */
 #define SILENCE_CHUNKS 60                            /* 1.2 s of silence ends the phrase */
 #define PRE_CHUNKS 16                                  /* 320 ms of audio kept from before the press */

@@ -17,6 +17,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -50,6 +51,13 @@ void muse_ui_preview_brightness(int pct);
 bool muse_ui_image_size(int *w, int *h);
 bool muse_ui_image_draw(int x, int y, int w, int h, const uint16_t *pixels);
 void muse_ui_image_hide(void);
+
+/*
+ * Takes ownership of an uploaded 240x240 RGB565 image (high byte first), or
+ * a GIF no larger than 240x240. The LVGL task applies it on its next frame.
+ */
+bool muse_ui_wallpaper_submit(uint8_t *data, size_t size, bool gif);
+void muse_ui_wallpaper_clear(void);
 /* Watcher camera mode: shows an on-screen shutter hint over the live image. */
 void muse_ui_camera_hint(bool visible);
 

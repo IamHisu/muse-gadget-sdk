@@ -23,8 +23,13 @@
 #include "freertos/semphr.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "sdkconfig.h"
 
 #include "muse_link.h"
+
+#ifndef CONFIG_MUSE_GEMINI_API_KEY
+#define CONFIG_MUSE_GEMINI_API_KEY ""
+#endif
 
 static const char *TAG = "muse_settings";
 
@@ -132,6 +137,10 @@ esp_err_t muse_settings_init(void)
     load_str("host", s.host, sizeof(s.host));
     load_str("vm", s.vm, sizeof(s.vm));
     load_str("token", s.token, sizeof(s.token));
+    if (!s.token[0] && CONFIG_MUSE_GEMINI_API_KEY[0]) {
+        strlcpy(s.token, CONFIG_MUSE_GEMINI_API_KEY, sizeof(s.token));
+        ESP_LOGI(TAG, "using compiled Gemini API key default");
+    }
 
     s.volume = clampi(s.volume, 0, 100);
     s.mic_gain = clampi(s.mic_gain, 0, MUSE_MIC_GAIN_MAX);

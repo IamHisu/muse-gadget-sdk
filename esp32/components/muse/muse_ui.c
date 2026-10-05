@@ -70,6 +70,7 @@ static const char *TAG = "muse_ui";
 #define COLOR_DOT_OFF 0x3a3358
 #define COLOR_LIT 0xf2efff
 #define SETTINGS_TICK_S 0.25f
+#define IDLE_CAPTION_SECS 3.5f
 
 /* Text on 128 px screens, as in the button menu (muse_menu.c). */
 #if LV_FONT_MONTSERRAT_12
@@ -93,6 +94,8 @@ static lv_obj_t *s_tv;
 static lv_obj_t *s_face;
 static lv_obj_t *s_settings;
 static lv_obj_t *s_dots[2];
+static lv_obj_t *s_bt_icon;
+static lv_obj_t *s_bt_slash;
 static lv_obj_t *s_wifi_icon;
 static lv_obj_t *s_wifi_slash;
 static lv_obj_t *s_status_mic;
@@ -130,6 +133,13 @@ static SemaphoreHandle_t s_image_mutex;
 static uint16_t *s_image_buf;
 static lv_area_t s_image_area;
 static bool s_image_dirty;
+static lv_obj_t *s_wallpaper;
+static lv_image_dsc_t s_wallpaper_dsc;
+static uint8_t *s_wallpaper_data;
+static uint8_t *s_wallpaper_pending;
+static size_t s_wallpaper_pending_size;
+static bool s_wallpaper_pending_gif;
+static bool s_wallpaper_clear_pending;
 static bool s_ready;
 
 #if LV_USE_GIF
@@ -140,12 +150,14 @@ extern const uint8_t boot_gif_end[] asm("_binary_windows_xp_boot_gif_end");
 static float s_level;
 static int s_shown_state = -1;
 static const char *s_shown_name;
-static const char *s_idle_name = "READY";   /* idle's label: set by the Wi-Fi state */
+static const char *s_idle_name = "";        /* connectivity is already shown by the top icons */
 static int s_shown_lit = -1;
 static uint32_t s_shown_accent;
 static bool s_meter_visible = true;
 static int s_ring_value = -1;
 static uint32_t s_caption_version;
+static float s_idle_caption_until;
+static bool s_caption_low;
 static float s_next_power_update;
 static float s_next_settings_tick;
 static bool s_dark;
@@ -855,8 +867,8 @@ static void build_screen(void)
     }
     build_button_icons(face);
 
-    /* Top-right status, from left to right: active microphone, Wi-Fi and
-     * battery. Battery stays at the outer edge as on the Zhengchen UI. */
+    /* Top-right status, from left to right: active microphone, Bluetooth,
+     * Wi-Fi and battery. Battery stays at the outer edge. */
     lv_obj_t *status = lv_obj_create(face);
     lv_obj_remove_style_all(status);
     lv_obj_remove_flag(status, LV_OBJ_FLAG_SCROLLABLE);
@@ -869,6 +881,20 @@ static void build_screen(void)
     s_status_mic = make_mic(status, 14);
     set_mic_object_color(s_status_mic, COLOR_ACCENT);
     lv_obj_add_flag(s_status_mic, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *bt_box = lv_obj_create(status);
+    lv_obj_remove_style_all(bt_box);
+    lv_obj_set_size(bt_box, 16, 16);
+    lv_obj_remove_flag(bt_box, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    s_bt_icon = make_label(bt_box, &lv_font_montserrat_14, COLOR_DIM);
+    lv_obj_center(s_bt_icon);
+    lv_label_set_text(s_bt_icon, LV_SYMBOL_BLUETOOTH);
+    static lv_point_precise_t bt_slash_points[] = { { 0, 15 }, { 15, 0 } };
+    s_bt_slash = lv_line_create(bt_box);
+    lv_line_set_points(s_bt_slash, bt_slash_points, 2);
+    lv_obj_set_style_line_width(s_bt_slash, 3, 0);
+    lv_obj_set_style_line_rounded(s_bt_slash, true, 0);
+    lv_obj_set_style_line_color(s_bt_slash, lv_color_hex(0xff554d), 0);
 
     lv_obj_t *wifi_box = lv_obj_create(status);
     lv_obj_remove_style_all(wifi_box);
@@ -921,10 +947,8 @@ static void build_screen(void)
     lv_obj_align(s_state_lbl, LV_ALIGN_TOP_MID, 0, s_small ? 22 : 40 + s_dy);
     lv_obj_set_flag(s_state_lbl, LV_OBJ_FLAG_HIDDEN, s_small && !s_tall && s_h < 200);
 
-    /* This gadget's own name, dim under the state while it's unpaired: with
-     * more than one on the bench, the screen says which one to pick in the
-     * Muse app. update_chrome() fills it in, shortens it to the hex tail on a
-     * screen too narrow for the whole thing, and empties it once paired. */
+    /* Kept as an empty layout anchor; Bluetooth state now lives in the top
+     * status row instead of showing the MuseGadget device name here. */
     s_name_lbl = make_label(face, s_small ? &lv_font_unscii_8 : &lv_font_unscii_16, COLOR_DIM);
     lv_obj_align(s_name_lbl, LV_ALIGN_TOP_MID, 0, s_small ? 32 : 60 + s_dy);
     /* Same rule as the state label: a square 128 px screen centres Muse over
@@ -1003,9 +1027,86 @@ static void image_hide_locked(void)
     xSemaphoreGive(s_image_mutex);
 }
 
+/* With the display lock held. Uploaded media is a real background: it stays
+ * behind the avatar, status icons and menus until the web page clears it. */
+static void wallpaper_clear_locked(void)
+{
+    if (s_wallpaper) {
+        lv_obj_delete(s_wallpaper);
+        s_wallpaper = NULL;
+    }
+    memset(&s_wallpaper_dsc, 0, sizeof(s_wallpaper_dsc));
+    heap_caps_free(s_wallpaper_data);
+    s_wallpaper_data = NULL;
+}
+
 /* Each frame: shows a new image and redraws what the download changed. */
 static void image_sync(void)
 {
+    uint8_t *uploaded = NULL;
+    size_t uploaded_size = 0;
+    bool uploaded_gif = false;
+    bool clear = false;
+
+    xSemaphoreTake(s_image_mutex, portMAX_DELAY);
+    if (s_wallpaper_pending || s_wallpaper_clear_pending) {
+        uploaded = s_wallpaper_pending;
+        uploaded_size = s_wallpaper_pending_size;
+        uploaded_gif = s_wallpaper_pending_gif;
+        clear = s_wallpaper_clear_pending;
+        s_wallpaper_pending = NULL;
+        s_wallpaper_pending_size = 0;
+        s_wallpaper_clear_pending = false;
+    }
+    xSemaphoreGive(s_image_mutex);
+
+    if (uploaded || clear) {
+        wallpaper_clear_locked();
+        if (uploaded_gif && uploaded) {
+            s_wallpaper_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+            s_wallpaper_dsc.header.cf = LV_COLOR_FORMAT_RAW;
+            s_wallpaper_dsc.data_size = uploaded_size;
+            s_wallpaper_dsc.data = uploaded;
+            s_wallpaper = lv_gif_create(s_face);
+            if (s_wallpaper) {
+                s_wallpaper_data = uploaded;
+                lv_gif_set_color_format(s_wallpaper, LV_COLOR_FORMAT_RGB565);
+                lv_gif_set_src(s_wallpaper, &s_wallpaper_dsc);
+                lv_obj_center(s_wallpaper);
+                lv_obj_move_to_index(s_wallpaper, 0);
+                muse_state_set_asleep(false);
+            } else {
+                heap_caps_free(uploaded);
+            }
+        } else if (uploaded) {
+            /* Web Bluetooth sends RGB565 high byte first, as display.draw_url
+             * does. Convert it to the ESP32's native uint16_t representation. */
+            uint16_t *pixels = (uint16_t *)uploaded;
+            for (size_t i = 0; i < uploaded_size / 2; ++i) {
+                uint8_t hi = uploaded[i * 2];
+                uint8_t lo = uploaded[i * 2 + 1];
+                pixels[i] = (uint16_t)(hi << 8 | lo);
+            }
+            s_wallpaper_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+            s_wallpaper_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+            s_wallpaper_dsc.header.w = s_w;
+            s_wallpaper_dsc.header.h = s_h;
+            s_wallpaper_dsc.header.stride = s_w * sizeof(uint16_t);
+            s_wallpaper_dsc.data_size = uploaded_size;
+            s_wallpaper_dsc.data = uploaded;
+            s_wallpaper = lv_image_create(s_face);
+            if (s_wallpaper) {
+                s_wallpaper_data = uploaded;
+                lv_image_set_src(s_wallpaper, &s_wallpaper_dsc);
+                lv_obj_set_pos(s_wallpaper, 0, 0);
+                lv_obj_move_to_index(s_wallpaper, 0);
+                muse_state_set_asleep(false);
+            } else {
+                heap_caps_free(uploaded);
+            }
+        }
+    }
+
     xSemaphoreTake(s_image_mutex, portMAX_DELAY);
     if (s_image_buf && !s_image_dsc.data) {
         s_image_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
@@ -1185,23 +1286,12 @@ static bool update_sleep(void)
     return s_dark;
 }
 
-/* Idle's label: whether a press reaches Hatch now or waits for Wi-Fi. */
+/* Wi-Fi state is already visible in the top icon, so disconnected idle states
+ * leave this line empty. */
 static const char *idle_name(muse_wifi_state_t wifi)
 {
-    static bool joined;   /* since boot: from then on, a drop is reconnecting */
-    switch (wifi) {
-    case MUSE_WIFI_CONNECTED:
-        joined = true;
-        return MODE_NAMES[MUSE_MODE_IDLE];
-    case MUSE_WIFI_OFF:
-        return "WI-FI OFF";
-    case MUSE_WIFI_NO_NETWORK:
-        return "SET UP WI-FI";
-    case MUSE_WIFI_NOT_NEARBY:
-        return "NO WI-FI";   /* none of the saved networks is in range */
-    default:
-        return joined ? "RECONNECTING" : "CONNECTING";
-    }
+    (void)wifi;
+    return "";
 }
 
 static void update_chrome(float now)
@@ -1238,6 +1328,9 @@ static void update_chrome(float now)
     s_idle_name = idle_name(w.state);
     muse_ble_status_t b;
     muse_ble_status(&b);
+    bool bt_connected = b.state == MUSE_BLE_CONNECTED;
+    lv_obj_set_style_text_color(s_bt_icon, lv_color_hex(bt_connected ? COLOR_ACCENT : COLOR_DIM), 0);
+    lv_obj_set_flag(s_bt_slash, LV_OBJ_FLAG_HIDDEN, bt_connected);
 
     /* Paired, the name has done its job (picking this one out in the Muse
      * app) and the speaker button has replies to mute. */
@@ -1245,21 +1338,8 @@ static void update_chrome(float now)
     muse_hatch_status(&h);
     bool paired = h.state != MUSE_HATCH_NOT_SET;
 
-    /* The gadget's name, until it's paired. Emptied rather than hidden: the
-     * read layout unhides it on the way out. A narrow screen gets the hex tail
-     * on its own, which is the part that differs between two of them, rather
-     * than a head that ends in dots before it gets there. */
-    const lv_font_t *name_font = s_small ? &lv_font_unscii_8 : &lv_font_unscii_16;
-    int name_cw = lv_font_get_glyph_width(name_font, 'M', ' ');
-    const char *shown = paired ? "" : b.name;
-    if (name_cw > 0 && (int)strlen(shown) * name_cw > s_w) {
-        const char *tail = strrchr(shown, '-');
-        if (tail && tail[1]) {
-            shown = tail + 1;
-        }
-    }
-    if (strcmp(shown, lv_label_get_text(s_name_lbl)) != 0) {
-        lv_label_set_text(s_name_lbl, shown);
+    if (lv_label_get_text(s_name_lbl)[0]) {
+        lv_label_set_text(s_name_lbl, "");
     }
 
     /* The same card asks for the talk button when the Muse app pairs. */
@@ -1420,6 +1500,14 @@ static void update_status(muse_mode_t mode, float now)
         }
     }
 
+    /* On the 240x240 button-only board, short idle notices use the otherwise
+     * empty button-hint strip. Listening and reply captions stay raised. */
+    bool caption_low = s_small && mode == MUSE_MODE_IDLE;
+    if (caption_low != s_caption_low) {
+        lv_obj_align(s_caption_lbl, LV_ALIGN_BOTTOM_MID, 0, caption_low ? -3 : -30);
+        s_caption_low = caption_low;
+    }
+
     static char caption[MUSE_CAPTION_MAX];
     bool fresh = muse_state_caption(caption, sizeof(caption), &s_caption_version);
     int answer = -1;
@@ -1437,6 +1525,16 @@ static void update_status(muse_mode_t mode, float now)
     if (answer != s_answer) {
         set_answer(answer);
         fresh = true;   /* the caption moves between labels */
+    }
+    if (mode != MUSE_MODE_IDLE) {
+        s_idle_caption_until = 0;
+    } else if (fresh) {
+        s_idle_caption_until = caption[0] ? now + IDLE_CAPTION_SECS : 0;
+    } else if (s_idle_caption_until > 0 && now >= s_idle_caption_until) {
+        caption[0] = '\0';
+        s_idle_caption_until = 0;
+        muse_state_set_caption("%s", "");
+        fresh = true;
     }
     if (fresh) {
         lv_obj_t *lbl = answer >= 0 ? s_reply_lbl : s_caption_lbl;
@@ -1706,6 +1804,35 @@ void muse_ui_image_hide(void)
     if (s_camera_hint) lv_obj_add_flag(s_camera_hint, LV_OBJ_FLAG_HIDDEN);
 #endif
     muse_board->display_unlock();
+}
+
+bool muse_ui_wallpaper_submit(uint8_t *data, size_t size, bool gif)
+{
+    if (!s_ready || !data || (!gif && size != (size_t)s_w * s_h * 2) ||
+        (gif && (size < 6 || size > 1024 * 1024 || memcmp(data, "GIF8", 4) != 0))) {
+        return false;
+    }
+    xSemaphoreTake(s_image_mutex, portMAX_DELAY);
+    heap_caps_free(s_wallpaper_pending);
+    s_wallpaper_pending = data;
+    s_wallpaper_pending_size = size;
+    s_wallpaper_pending_gif = gif;
+    s_wallpaper_clear_pending = false;
+    xSemaphoreGive(s_image_mutex);
+    return true;
+}
+
+void muse_ui_wallpaper_clear(void)
+{
+    if (!s_ready) {
+        return;
+    }
+    xSemaphoreTake(s_image_mutex, portMAX_DELAY);
+    heap_caps_free(s_wallpaper_pending);
+    s_wallpaper_pending = NULL;
+    s_wallpaper_pending_size = 0;
+    s_wallpaper_clear_pending = true;
+    xSemaphoreGive(s_image_mutex);
 }
 
 #if CONFIG_MUSE_WATCHER_CAMERA

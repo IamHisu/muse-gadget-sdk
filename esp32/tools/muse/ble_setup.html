@@ -15,20 +15,19 @@
   limitations under the License.
 -->
 <!--
-  Muse setup over Bluetooth LE (Web Bluetooth).
+  Hisu setup over Bluetooth LE (Web Bluetooth).
 
-  1. On Muse: open the button menu > Bluetooth setup and scan the QR code.
-  2. Serve this folder and open it in Chrome (desktop or Android):
+  1. Serve this folder and open it in Chrome (desktop or Android):
        cd tools && python3 -m http.server 8000   ->  http://localhost:8000/ble_setup.html
      Web Bluetooth needs https or localhost. iOS Safari lacks Web Bluetooth;
      use the Bluefy browser there.
-  3. Connect, then enter the 6-digit code Muse shows when your OS asks to pair.
+  2. Connect, then enter the 6-digit code shown when your OS asks to pair.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Muse setup</title>
+<title>Hisu setup</title>
 <style>
   :root { --bg:#0b0816; --card:#1a1530; --accent:#a77dff; --text:#f2efff; --dim:#8b84a8; --ok:#6ff0bf; --bad:#ff5c5c; }
   * { box-sizing: border-box; }
@@ -58,13 +57,20 @@
   #log { font:13px/1.5 ui-monospace, monospace; white-space:pre-wrap; color:var(--dim); max-height:180px; overflow:auto; }
   .ok { color:var(--ok); } .bad { color:var(--bad); }
   fieldset { border:0; padding:0; margin:0; }
+  .tabs { display:flex; gap:6px; margin:18px 0 4px; overflow-x:auto; padding-bottom:2px; }
+  .tab { flex:1 0 auto; margin:0; padding:9px 12px; background:#211a3c; color:var(--dim); }
+  .tab.active { background:var(--accent); color:#140f22; }
+  .panel { display:none; }
+  .panel.active { display:block; }
+  .file { display:block; border:1px dashed #594d82; border-radius:14px; padding:18px; text-align:center; cursor:pointer; }
+  .file input { display:none; }
+  #preview { display:block; width:160px; height:160px; object-fit:contain; background:#000; border-radius:12px; margin:14px auto 0; }
+  progress { width:100%; height:12px; accent-color:var(--accent); margin-top:12px; }
 </style>
 </head>
 <body>
 <main>
-  <h1>Muse setup</h1>
-  <p class="dim">Open <b>Bluetooth setup</b> on Muse, then connect.
-     When asked to pair, type the code shown on Muse's screen.</p>
+  <h1>Hisu setup</h1>
 
   <section>
     <div class="row"><h2 style="margin:0">Device</h2><span id="conn" class="dim">Not connected</span></div>
@@ -73,8 +79,15 @@
     <div id="status" class="dim" style="margin-top:12px"></div>
   </section>
 
+  <nav class="tabs" aria-label="Setup sections">
+    <button class="tab active" data-tab="wifi" type="button">Wi-Fi</button>
+    <button class="tab" data-tab="display" type="button">Display</button>
+    <button class="tab" data-tab="sound" type="button">Sound</button>
+    <button class="tab" data-tab="log-panel" type="button">Log</button>
+  </nav>
+
   <fieldset id="controls" disabled>
-    <section>
+    <section id="wifi" class="panel active">
       <h2>Wi-Fi</h2>
       <label for="ssid-list">Network</label>
       <div class="wifi-row">
@@ -90,15 +103,19 @@
       <button id="wifi-forget" class="secondary">Forget all networks</button>
     </section>
 
-    <section>
-      <h2>Gemini</h2>
-      <label for="token">Gemini API key <span class="dim">(leave empty to keep the current one)</span></label>
-      <input id="token" type="password" autocomplete="off" maxlength="1023">
-      <button id="hatch-save">Save</button>
-      <button id="hatch-test" class="secondary">Test connection</button>
+    <section id="display" class="panel">
+      <h2>Wallpaper</h2>
+      <label class="file" for="wallpaper">
+        Choose JPG, PNG or GIF
+        <input id="wallpaper" type="file" accept="image/jpeg,image/png,image/gif,.jpg,.jpeg,.png,.gif">
+      </label>
+      <img id="preview" class="hidden" alt="Wallpaper preview">
+      <progress id="upload-progress" class="hidden" max="100" value="0"></progress>
+      <div id="upload-state" class="dim" style="margin-top:8px">JPG and PNG are fitted to 240×240. GIF must be no larger than 240×240 and 1 MB.</div>
+      <button id="wallpaper-clear" class="secondary" type="button">Show Hisu</button>
     </section>
 
-    <section>
+    <section id="sound" class="panel">
       <h2>Sound &amp; sleep</h2>
       <label>Volume <span id="volume-v"></span></label>
       <input id="volume" type="range" min="0" max="100">
@@ -115,7 +132,7 @@
     </section>
   </fieldset>
 
-  <section>
+  <section id="log-panel" class="panel">
     <h2>Log</h2>
     <div id="log"></div>
   </section>
@@ -126,11 +143,14 @@ const SVC    = '4d757365-0001-4000-8000-6a6f6c6c7900';
 const CMD    = '4d757365-0002-4000-8000-6a6f6c6c7900';
 const STATUS = '4d757365-0003-4000-8000-6a6f6c6c7900';
 const NETWORKS = '4d757365-0004-4000-8000-6a6f6c6c7900';
-const TOKEN_CHUNK = 180;   // stays well under the 512-byte attribute limit
+const MEDIA = '4d757365-0005-4000-8000-6a6f6c6c7900';
+const MEDIA_CHUNK = 180;   // safe with the 256-byte MTU used by the board
 
 const $ = id => document.getElementById(id);
-let device, cmdChar, statusChar, networksChar;
+let device, cmdChar, statusChar, networksChar, mediaChar;
 let scanRunning = false;
+let uploadRunning = false;
+let previewUrl;
 
 // Web Bluetooth allows only one GATT operation at a time, so every read and
 // write goes through this single queue.
@@ -149,18 +169,21 @@ function log(msg, cls) {
 }
 
 function send(cmd, value = '') {
-  return gatt(() => cmdChar.writeValueWithResponse(new TextEncoder().encode(`${cmd}=${value}`)))
+  return writeCommand(cmd, value)
     .catch(e => log(`${cmd} failed: ${e.message}`, 'bad'));
+}
+
+function writeCommand(cmd, value = '') {
+  return gatt(() => cmdChar.writeValueWithResponse(new TextEncoder().encode(`${cmd}=${value}`)));
 }
 
 async function refresh() {
   const v = await gatt(() => statusChar.readValue());
   const s = JSON.parse(new TextDecoder().decode(v));
-  const w = s.wifi, h = s.gemini;
+  const w = s.wifi;
   $('conn').textContent = `${s.name} · fw ${s.fw}`;
   $('status').innerHTML =
     `Wi-Fi: <b>${w.on ? esc(w.state) : 'off'}</b>${w.ssid ? ` (${esc(w.ssid)}${w.ip ? `, ${esc(w.ip)}` : ''})` : ''}<br>` +
-    `Gemini: <b>${esc(h.state)}</b> · API key ${h.key ? 'set' : 'not set'}<br>` +
     (s.battery >= 0 ? `Battery ${s.battery}%` : 'Battery: n/a');
   if (document.activeElement !== $('ssid') && !$('ssid').value) $('ssid').value = w.ssid || '';
   setRange('volume', s.volume, v => `${v}%`);
@@ -262,6 +285,7 @@ async function connect() {
     $('connect').disabled = false;
     $('disconnect').disabled = true;
     networksChar = undefined;
+    mediaChar = undefined;
     gattQueue = Promise.resolve();
     scanRunning = false;
   });
@@ -275,6 +299,12 @@ async function connect() {
   } catch (e) {
     networksChar = undefined;
     log('Wi-Fi scan service is not visible. Remove this device from Bluetooth settings, then pair again.', 'bad');
+  }
+  try {
+    mediaChar = await svc.getCharacteristic(MEDIA);
+  } catch (e) {
+    mediaChar = undefined;
+    log('Wallpaper upload needs the latest Hisu firmware.', 'bad');
   }
   // The first protected read triggers pairing: enter the code shown on Muse.
   log('Pairing: enter the code shown on Muse if asked');
@@ -327,16 +357,102 @@ $('wifi-forget').onclick = () => {
   send('wifi.forget');
 };
 
-$('hatch-save').onclick = async () => {
-  const token = $('token').value.trim();
-  const jobs = [];
-  for (let i = 0; i < token.length; i += TOKEN_CHUNK) {
-    jobs.push(send(i ? 'gemini.key+' : 'gemini.key', token.slice(i, i + TOKEN_CHUNK)));
+for (const tab of document.querySelectorAll('.tab')) {
+  tab.onclick = () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === tab));
+    document.querySelectorAll('.panel').forEach(x => x.classList.toggle('active', x.id === tab.dataset.tab));
+  };
+}
+
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Could not read this image.'));
+    image.src = url;
+  });
+}
+
+function fittedRgb565(image) {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 240;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) throw new Error('Canvas is unavailable in this browser.');
+  context.fillStyle = '#000';
+  context.fillRect(0, 0, 240, 240);
+  const scale = Math.min(240 / image.naturalWidth, 240 / image.naturalHeight);
+  const width = Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = Math.max(1, Math.round(image.naturalHeight * scale));
+  context.drawImage(image, (240 - width) / 2, (240 - height) / 2, width, height);
+  const rgba = context.getImageData(0, 0, 240, 240).data;
+  const bytes = new Uint8Array(240 * 240 * 2);
+  for (let i = 0, j = 0; i < rgba.length; i += 4, j += 2) {
+    const rgb565 = ((rgba[i] & 0xf8) << 8) | ((rgba[i + 1] & 0xfc) << 3) | (rgba[i + 2] >> 3);
+    bytes[j] = rgb565 >> 8;
+    bytes[j + 1] = rgb565 & 0xff;
   }
-  await Promise.all(jobs);
-  $('token').value = '';
+  return bytes;
+}
+
+async function uploadWallpaper(file) {
+  if (uploadRunning || !mediaChar) {
+    if (!mediaChar) $('upload-state').textContent = 'Connect to a board with the latest firmware first.';
+    return;
+  }
+  const gif = file.type === 'image/gif' || /\.gif$/i.test(file.name);
+  const still = /image\/(jpeg|png)/.test(file.type) || /\.(jpe?g|png)$/i.test(file.name);
+  if (!gif && !still) {
+    $('upload-state').textContent = 'Choose a JPG, PNG or GIF file.';
+    return;
+  }
+  if (gif && file.size > 1024 * 1024) {
+    $('upload-state').textContent = 'GIF must be 1 MB or smaller.';
+    return;
+  }
+
+  uploadRunning = true;
+  $('wallpaper').disabled = $('wallpaper-clear').disabled = true;
+  $('upload-progress').classList.remove('hidden');
+  $('upload-progress').value = 0;
+  $('upload-state').textContent = 'Preparing image…';
+  try {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = URL.createObjectURL(file);
+    $('preview').src = previewUrl;
+    $('preview').classList.remove('hidden');
+    const image = await loadImage(previewUrl);
+    if (gif && (image.naturalWidth > 240 || image.naturalHeight > 240)) {
+      throw new Error('GIF dimensions must be no larger than 240×240.');
+    }
+    const bytes = gif ? new Uint8Array(await file.arrayBuffer()) : fittedRgb565(image);
+    await writeCommand('media.begin', `${gif ? 'gif' : 'still'},${bytes.byteLength}`);
+    $('upload-state').textContent = 'Sending to Hisu…';
+    for (let offset = 0; offset < bytes.length; offset += MEDIA_CHUNK) {
+      const chunk = bytes.subarray(offset, Math.min(offset + MEDIA_CHUNK, bytes.length));
+      await gatt(() => mediaChar.writeValueWithResponse(chunk));
+      $('upload-progress').value = Math.round((offset + chunk.length) * 100 / bytes.length);
+    }
+    await writeCommand('media.commit');
+    $('upload-state').textContent = 'Wallpaper is now shown on Hisu.';
+    log(`Uploaded ${gif ? 'GIF' : 'image'} (${Math.round(bytes.length / 1024)} KB)`, 'ok');
+  } catch (e) {
+    $('upload-state').textContent = e.message;
+    log(`Wallpaper upload failed: ${e.message}`, 'bad');
+  } finally {
+    uploadRunning = false;
+    $('wallpaper').disabled = $('wallpaper-clear').disabled = false;
+    $('wallpaper').value = '';
+  }
+}
+
+$('wallpaper').onchange = () => {
+  const file = $('wallpaper').files[0];
+  if (file) uploadWallpaper(file);
 };
-$('hatch-test').onclick = () => send('gemini.test');
+$('wallpaper-clear').onclick = async () => {
+  await send('media.clear');
+  $('upload-state').textContent = 'Hisu is visible again.';
+};
 
 for (const [id, cmd, fmt] of [['volume', 'volume', v => `${v}%`], ['mic', 'mic_gain', v => `${v} dB`],
                               ['bright', 'brightness', v => `${v}%`]]) {
@@ -346,9 +462,9 @@ for (const [id, cmd, fmt] of [['volume', 'volume', v => `${v}%`], ['mic', 'mic_g
 $('speaker').onchange = () => send('speaker', $('speaker').checked ? 1 : 0);
 $('sleep').onchange = () => send('sleep', $('sleep').value);
 
-// Keep Wi-Fi/Gemini state fresh while connected (skipped during a Wi-Fi scan).
+// Keep device state fresh while connected (skipped during long GATT operations).
 setInterval(() => {
-  if (device?.gatt.connected && !$('controls').disabled && !scanRunning) refresh().catch(() => {});
+  if (device?.gatt.connected && !$('controls').disabled && !scanRunning && !uploadRunning) refresh().catch(() => {});
 }, 3000);
 </script>
 </body>

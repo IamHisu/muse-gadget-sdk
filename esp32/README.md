@@ -37,6 +37,8 @@ Trợ lý giọng nói dùng Gemini Live và trả lời bằng tiếng Việt. 
 
 Trang setup cũ đã publish vẫn dùng được: nhập Gemini API key vào ô **Device token**. Firmware giữ lệnh cũ để tương thích trong lúc trang mới chưa được deploy.
 
+Cũng có thể chạy `idf.py menuconfig`, mở **Muse → Gemini API key**, nhập key rồi lưu và build lại. Đây là key mặc định được biên dịch vào firmware; key đã lưu trong NVS qua Bluetooth sẽ được ưu tiên. `sdkconfig` và thư mục `build` đã được `.gitignore` để tránh đưa key lên Git.
+
 ## Flash và monitor
 
 Chỉ chạy sau khi build thành công và đã xác định đúng cổng COM:

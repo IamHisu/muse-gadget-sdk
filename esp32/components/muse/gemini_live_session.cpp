@@ -156,7 +156,30 @@ static void ws_event(void *, esp_event_base_t, int32_t id, void *data)
         ESP_LOGI(TAG, "WebSocket connected");
         return;
     }
-    if (id == WEBSOCKET_EVENT_DISCONNECTED || id == WEBSOCKET_EVENT_CLOSED || id == WEBSOCKET_EVENT_ERROR) {
+    if (id == WEBSOCKET_EVENT_ERROR) {
+        if (ev) {
+            ESP_LOGE(TAG,
+                     "WebSocket error: type=%d close=%d handshake=%d tls=0x%x stack=0x%x socket=%d",
+                     (int)ev->error_handle.error_type, ev->close_status_code,
+                     ev->error_handle.esp_ws_handshake_status_code,
+                     (unsigned)ev->error_handle.esp_tls_last_esp_err,
+                     (unsigned)ev->error_handle.esp_tls_stack_err,
+                     ev->error_handle.esp_transport_sock_errno);
+        } else {
+            ESP_LOGE(TAG, "WebSocket error (no details)");
+        }
+        s_connected.store(false);
+        s_setup_complete.store(false);
+        return;
+    }
+    if (id == WEBSOCKET_EVENT_CLOSED) {
+        ESP_LOGW(TAG, "WebSocket closed by server: status=%d", ev ? ev->close_status_code : 0);
+        s_connected.store(false);
+        s_setup_complete.store(false);
+        return;
+    }
+    if (id == WEBSOCKET_EVENT_DISCONNECTED) {
+        ESP_LOGW(TAG, "WebSocket disconnected: close=%d", ev ? ev->close_status_code : 0);
         s_connected.store(false);
         s_setup_complete.store(false);
         return;
@@ -268,8 +291,7 @@ static bool connect_gemini(void)
         "\"systemInstruction\":{\"parts\":[{\"text\":\"Bạn là trợ lý giọng nói cá nhân tên Hisu. "
         "Luôn trả lời bằng tiếng Việt tự nhiên, ngắn gọn và chính xác, không dùng đại từ nhân xưng.\"}]},"
         "\"inputAudioTranscription\":{},\"outputAudioTranscription\":{},"
-        "\"realtimeInputConfig\":{\"automaticActivityDetection\":{\"disabled\":true}},"
-        "\"tools\":[{\"googleSearch\":{}}]}}";
+        "\"realtimeInputConfig\":{\"automaticActivityDetection\":{\"disabled\":true}}}}";
     if (!send_json(setup)) {
         disconnect();
         muse_hatch_report(MUSE_HATCH_UNREACHABLE, "Setup send failed");
